@@ -209,41 +209,34 @@ public class NotificationPusher {
 		self.configurationsLock.doWithLock {
 			conf = self.iosConfigurations[configuration]
 		}
-		
-		if let c = conf {
-			
-			var net: NotificationHTTP2Client?
-			var needsConnect = false
-			c.lock.doWithLock {
-				if c.streams.count > 0 {
-					net = c.streams.removeLast()
-				} else {
-					needsConnect = true
-					net = NotificationHTTP2Client(id: idCounter)
-					activeStreams[idCounter] = net
-					idCounter = idCounter &+ 1
-				}
-			}
-			
-			if !needsConnect {
-				callback(net!)
-			} else {
-				// add a new connected stream
-				
-				c.configurator(net!.net)
-				net!.connect(host: self.notificationHostIOS, port: iosNotificationPort, ssl: true, timeoutSeconds: 5.0) {
-					b in
-					if b {
-						callback(net!)
-					} else {
-						callback(nil)
-					}
-				}
-			}
-			
-		} else {
-			callback(nil)
-		}
+        guard let c = conf else {
+            callback(nil)
+        }
+        var net: NotificationHTTP2Client?
+        var needsConnect = false
+        c.lock.doWithLock {
+            if c.streams.count > 0 {
+                net = c.streams.removeLast()
+            } else {
+                needsConnect = true
+                net = NotificationHTTP2Client(id: idCounter)
+                activeStreams[idCounter] = net
+                idCounter = idCounter &+ 1
+            }
+        }
+        guard needsConnect else {
+            callback(net)
+            return
+        }
+        c.configurator(net!.net)
+        net!.connect(host: self.notificationHostIOS, port: iosNotificationPort, ssl: true, timeoutSeconds: 5.0) {
+            b in
+            if b {
+                callback(net!)
+            } else {
+                callback(nil)
+            }
+        }
 	}
 	
 	static func releaseStreamIOS(configurationName configuration: String, net: HTTP2Client) {
@@ -252,18 +245,17 @@ public class NotificationPusher {
 			conf = self.iosConfigurations[configuration]
 		}
 		
-		if let c = conf, n = net as? NotificationHTTP2Client {
-			
-			c.lock.doWithLock {
-				activeStreams.removeValue(forKey: n.id)
-				if net.isConnected {
-					c.streams.append(n)
-				}
-			}
-			
-		} else {
-			net.close()
-		}
+        guard let c = conf, n = net as? NotificationHTTP2Client  else {
+            net.close()
+            return
+        }
+        
+        c.lock.doWithLock {
+            activeStreams.removeValue(forKey: n.id)
+            if net.isConnected {
+                c.streams.append(n)
+            }
+        }
 	}
 	
     /// Public initializer
@@ -291,21 +283,21 @@ public class NotificationPusher {
 		
 		NotificationPusher.getStreamIOS(configurationName: configurationName) {
 			client in
-			if let c = client {
-				self.pushIOS(c, deviceTokens: [deviceToken], expiration: expiration, priority: priority, notificationItems: notificationItems) {
-					responses in
-					
-					NotificationPusher.releaseStreamIOS(configurationName: configurationName, net: c)
-					
-					if responses.count == 1 {
-						callback(responses.first!)
-					} else {
-						callback(NotificationResponse(status: .internalServerError, body: [UInt8]()))
-					}
-				}
-			} else {
-				callback(NotificationResponse(status: .internalServerError, body: [UInt8]()))
-			}
+            guard let c = client else {
+                callback(NotificationResponse(status: .internalServerError, body: [UInt8]()))
+                return
+            }
+            self.pushIOS(c, deviceTokens: [deviceToken], expiration: expiration, priority: priority, notificationItems: notificationItems) {
+                responses in
+                
+                NotificationPusher.releaseStreamIOS(configurationName: configurationName, net: c)
+                
+                guard responses.count == 1 else {
+                    callback(NotificationResponse(status: .internalServerError, body: [UInt8]()))
+                    return
+                }
+                callback(responses.first!)
+            }
 		}
 	}
 	
@@ -319,21 +311,21 @@ public class NotificationPusher {
 		
 		NotificationPusher.getStreamIOS(configurationName: configurationName) {
 			client in
-			if let c = client {
-				self.pushIOS(c, deviceTokens: deviceTokens, expiration: expiration, priority: priority, notificationItems: notificationItems) {
-					responses in
-					
-					NotificationPusher.releaseStreamIOS(configurationName: configurationName, net: c)
-					
-					if responses.count == 1 {
-						callback(responses)
-					} else {
-						callback([NotificationResponse(status: .internalServerError, body: [UInt8]())])
-					}
-				}
-			} else {
-				callback([NotificationResponse(status: .internalServerError, body: [UInt8]())])
-			}
+            guard let c = client else {
+                callback([NotificationResponse(status: .internalServerError, body: [UInt8]())])
+                return
+            }
+            self.pushIOS(c, deviceTokens: deviceTokens, expiration: expiration, priority: priority, notificationItems: notificationItems) {
+                responses in
+                
+                NotificationPusher.releaseStreamIOS(configurationName: configurationName, net: c)
+                
+                guard responses.count == 1 else {
+                    callback([NotificationResponse(status: .internalServerError, body: [UInt8]())])
+                    return
+                }
+                callback(responses)
+            }
 		}
 	}
 	
@@ -352,27 +344,28 @@ public class NotificationPusher {
 		net.sendRequest(request) {
 			response, msg in
 			
-			if let r = response {
-				callback(NotificationResponse(status: r.status, body: r.bodyBytes))
-			} else {
-				callback(NotificationResponse(status: .internalServerError, body: UTF8Encoding.decode(string: "No response")))
-			}
+            guard let r = response else {
+                callback(NotificationResponse(status: .internalServerError, body: UTF8Encoding.decode(string: "No response")))
+                return
+            }
+            callback(NotificationResponse(status: r.status, body: r.bodyBytes))
+            
 		}
 	}
 	
 	func pushIOS(_ client: HTTP2Client, deviceTokens: ComponentGenerator, expiration: UInt32, priority: UInt8, notificationJson: [UInt8], callback: ([NotificationResponse]) -> ()) {
 		var g = deviceTokens
-		if let next = g.next() {
-			pushIOS(client, deviceToken: next, expiration: expiration, priority: priority, notificationJson: notificationJson) {
-				response in
-				
-				self.responses.append(response)
-				
-				self.pushIOS(client, deviceTokens: g, expiration: expiration, priority: priority, notificationJson: notificationJson, callback: callback)
-			}
-		} else {
-			callback(self.responses)
-		}
+        guard let next = g.next() else {
+            callback(self.responses)
+            return
+        }
+        pushIOS(client, deviceToken: next, expiration: expiration, priority: priority, notificationJson: notificationJson) {
+            response in
+            
+            self.responses.append(response)
+            
+            self.pushIOS(client, deviceTokens: g, expiration: expiration, priority: priority, notificationJson: notificationJson, callback: callback)
+        }
 	}
 	
 	func pushIOS(_ client: HTTP2Client, deviceTokens: [String], expiration: UInt32, priority: UInt8, notificationItems: [IOSNotificationItem], callback: ([NotificationResponse]) -> ()) {
