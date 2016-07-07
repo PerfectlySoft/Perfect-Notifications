@@ -210,7 +210,7 @@ public class NotificationPusher {
 			conf = self.iosConfigurations[configuration]
 		}
         guard let c = conf else {
-            callback(nil)
+            return callback(nil)
         }
         var net: NotificationHTTP2Client?
         var needsConnect = false
