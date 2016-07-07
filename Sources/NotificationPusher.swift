@@ -20,6 +20,8 @@
 import PerfectLib
 import PerfectNet
 import PerfectThread
+import PerfectHTTPServer
+import PerfectHTTP
 
 /**
 Example code:
