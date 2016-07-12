@@ -1,6 +1,8 @@
 # Perfect-Notifications
 iOS Notifications for Perfect
 
+[![GitHub version](https://badge.fury.io/gh/PerfectlySoft%2FPerfect-Notifications.svg)](https://badge.fury.io/gh/PerfectlySoft%2FPerfect-Notifications)
+
 Building
 --------
 
