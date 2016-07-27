@@ -2,6 +2,16 @@
 iOS Notifications for Perfect
 
 [![GitHub version](https://badge.fury.io/gh/PerfectlySoft%2FPerfect-Notifications.svg)](https://badge.fury.io/gh/PerfectlySoft%2FPerfect-Notifications)
+[![Gitter](https://badges.gitter.im/PerfectlySoft/PerfectDocs.svg)](https://gitter.im/PerfectlySoft/PerfectDocs?utm_source=badge&utm_medium=badge&utm_campaign=pr-badge)
+
+## Issues
+
+We are transitioning to using JIRA for all bugs and support related issues, therefore the GitHub issues has been disabled.
+
+If you find a mistake, bug, or any other helpful suggestion you'd like to make on the docs please head over to [http://jira.perfect.org:8080/servicedesk/customer/portal/1](http://jira.perfect.org:8080/servicedesk/customer/portal/1) and raise it.
+
+A comprehensive list of open issues can be found at [http://jira.perfect.org:8080/projects/ISS/issues](http://jira.perfect.org:8080/projects/ISS/issues)
+
 
 Building
 --------
@@ -60,24 +70,7 @@ n.pushIOS(configurationName, deviceToken: deviceId, expiration: 0, priority: 10,
 // END - individual notification push
 ```
 
-## Repository Layout
 
-We have finished refactoring Perfect to support Swift Package Manager. The Perfect project has been split up into the following repositories:
-
-* [Perfect](https://github.com/PerfectlySoft/Perfect) - This repository contains the core PerfectLib and will continue to be the main landing point for the project.
-* [PerfectTemplate](https://github.com/PerfectlySoft/PerfectTemplate) - A simple starter project which compiles with SPM into a stand-alone executable HTTP server. This repository is ideal for starting on your own Perfect based project.
-* [PerfectDocs](https://github.com/PerfectlySoft/PerfectDocs) - Contains all API reference related material.
-* [PerfectExamples](https://github.com/PerfectlySoft/PerfectExamples) - All the Perfect example projects and documentation.
-* [PerfectEverything](https://github.com/PerfectlySoft/PerfectEverything) - This umbrella repository allows one to pull in all the related Perfect modules in one go, including the servers, examples, database connectors and documentation. This is a great place to start for people wishing to get up to speed with Perfect.
-* [PerfectServer](https://github.com/PerfectlySoft/PerfectServer) - Contains the PerfectServer variants, including the stand-alone HTTP and FastCGI servers. Those wishing to do a manual deployment should clone and build from this repository.
-* [Perfect-Redis](https://github.com/PerfectlySoft/Perfect-Redis) - Redis database connector.
-* [Perfect-SQLite](https://github.com/PerfectlySoft/Perfect-SQLite) - SQLite3 database connector.
-* [Perfect-PostgreSQL](https://github.com/PerfectlySoft/Perfect-PostgreSQL) - PostgreSQL database connector.
-* [Perfect-MySQL](https://github.com/PerfectlySoft/Perfect-MySQL) - MySQL database connector.
-* [Perfect-MongoDB](https://github.com/PerfectlySoft/Perfect-MongoDB) - MongoDB database connector.
-* [Perfect-FastCGI-Apache2.4](https://github.com/PerfectlySoft/Perfect-FastCGI-Apache2.4) - Apache 2.4 FastCGI module; required for the Perfect FastCGI server variant.
-
-The database connectors are all stand-alone and can be used outside of the Perfect framework and server.
 
 ## Further Information
 For more information on the Perfect project, please visit [perfect.org](http://perfect.org).
