@@ -203,7 +203,7 @@ public class NotificationPusher {
 		}
 	}
 	
-	static func getStreamIOS(configurationName configuration: String, callback: (HTTP2Client?) -> ()) {
+	static func getStreamIOS(configurationName configuration: String, callback: @escaping (HTTP2Client?) -> ()) {
 		
 		var conf: NotificationConfiguration?
 		self.configurationsLock.doWithLock {
@@ -245,7 +245,7 @@ public class NotificationPusher {
 			conf = self.iosConfigurations[configuration]
 		}
 		
-        guard let c = conf, n = net as? NotificationHTTP2Client  else {
+        guard let c = conf, let n = net as? NotificationHTTP2Client  else {
             net.close()
             return
         }
@@ -279,7 +279,7 @@ public class NotificationPusher {
 	///		https://developer.apple.com/library/mac/documentation/NetworkingInternet/Conceptual/RemoteNotificationsPG/Chapters/APNsProviderAPI.html
 	/// Provide a list of IOSNotificationItems.
 	/// Provide a callback with which to receive the response.
-	public func pushIOS(configurationName: String, deviceToken: String, expiration: UInt32, priority: UInt8, notificationItems: [IOSNotificationItem], callback: (NotificationResponse) -> ()) {
+	public func pushIOS(configurationName: String, deviceToken: String, expiration: UInt32, priority: UInt8, notificationItems: [IOSNotificationItem], callback: @escaping (NotificationResponse) -> ()) {
 		
 		NotificationPusher.getStreamIOS(configurationName: configurationName) {
 			client in
@@ -307,7 +307,7 @@ public class NotificationPusher {
 	///		https://developer.apple.com/library/mac/documentation/NetworkingInternet/Conceptual/RemoteNotificationsPG/Chapters/APNsProviderAPI.html
 	/// Provide a list of IOSNotificationItems.
 	/// Provide a callback with which to receive the responses.
-	public func pushIOS(configurationName: String, deviceTokens: [String], expiration: UInt32, priority: UInt8, notificationItems: [IOSNotificationItem], callback: ([NotificationResponse]) -> ()) {
+	public func pushIOS(configurationName: String, deviceTokens: [String], expiration: UInt32, priority: UInt8, notificationItems: [IOSNotificationItem], callback: @escaping ([NotificationResponse]) -> ()) {
 		
 		NotificationPusher.getStreamIOS(configurationName: configurationName) {
 			client in
@@ -329,7 +329,7 @@ public class NotificationPusher {
 		}
 	}
 	
-	func pushIOS(_ net: HTTP2Client, deviceToken: String, expiration: UInt32, priority: UInt8, notificationJson: [UInt8], callback: (NotificationResponse) -> ()) {
+	func pushIOS(_ net: HTTP2Client, deviceToken: String, expiration: UInt32, priority: UInt8, notificationJson: [UInt8], callback: @escaping (NotificationResponse) -> ()) {
 		
 		let request = net.createRequest()
 		request.method = .post
@@ -353,7 +353,7 @@ public class NotificationPusher {
 		}
 	}
 	
-	func pushIOS(_ client: HTTP2Client, deviceTokens: ComponentGenerator, expiration: UInt32, priority: UInt8, notificationJson: [UInt8], callback: ([NotificationResponse]) -> ()) {
+	func pushIOS(_ client: HTTP2Client, deviceTokens: ComponentGenerator, expiration: UInt32, priority: UInt8, notificationJson: [UInt8], callback: @escaping ([NotificationResponse]) -> ()) {
 		var g = deviceTokens
         guard let next = g.next() else {
             callback(self.responses)
@@ -368,7 +368,7 @@ public class NotificationPusher {
         }
 	}
 	
-	func pushIOS(_ client: HTTP2Client, deviceTokens: [String], expiration: UInt32, priority: UInt8, notificationItems: [IOSNotificationItem], callback: ([NotificationResponse]) -> ()) {
+	func pushIOS(_ client: HTTP2Client, deviceTokens: [String], expiration: UInt32, priority: UInt8, notificationItems: [IOSNotificationItem], callback: @escaping ([NotificationResponse]) -> ()) {
 		self.resetResponses()
 		let g = deviceTokens.makeIterator()
 		let jsond = UTF8Encoding.decode(string: self.itemsToPayloadString(notificationItems: notificationItems))
