@@ -1,5 +1,5 @@
 import XCTest
-@testable import PerfectNotificationsTestSuite
+@testable import PerfectNotificationsTests
 
 XCTMain([
      testCase(PerfectNotificationsTests.allTests),
