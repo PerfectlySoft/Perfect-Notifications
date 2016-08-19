@@ -124,7 +124,7 @@ class NotificationConfiguration {
 	let lock = Threading.Lock()
 	var streams = [NotificationHTTP2Client]()
 	
-	init(configurator: NotificationPusher.netConfigurator) {
+	init(configurator: @escaping NotificationPusher.netConfigurator) {
 		self.configurator = configurator
 	}
 }
@@ -197,7 +197,7 @@ public class NotificationPusher {
 	/// 2. Path to push notification certificate as obtained from Apple: net.useCertificateFile("path/to/aps.pem")
 	/// 3a. Password for the certificate's private key file, if it is password protected: net.keyFilePassword = "password"
 	/// 3b. Path to the certificate's private key file: net.usePrivateKeyFile("path/to/key.pem")
-	public static func addConfigurationIOS(name nam: String, configurator: netConfigurator) {
+	public static func addConfigurationIOS(name nam: String, configurator: @escaping netConfigurator) {
 		self.configurationsLock.doWithLock {
 			self.iosConfigurations[nam] = NotificationConfiguration(configurator: configurator)
 		}
