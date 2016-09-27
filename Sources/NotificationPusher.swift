@@ -98,7 +98,7 @@ public enum IOSNotificationItem {
     /// custom payload data
 	case customPayload(String, Any)
     /// apn mutable-content key
-        case mutableContent
+    case mutableContent
 }
 
 enum IOSItemId: UInt8 {
@@ -413,9 +413,9 @@ public class NotificationPusher {
 				aps["category"] = s
 			case .customPayload(let s, let a):
 				dict[s] = a
-                    case .mutableContent:
-                        aps["mutable-content"] = 1
-                }
+            case .mutableContent:
+                aps["mutable-content"] = 1
+            }
 		}
 		
 		if let ab = alertBody {
