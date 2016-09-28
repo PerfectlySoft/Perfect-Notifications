@@ -1,4 +1,4 @@
-# Perfect-Notifications [简体中文](README.zh_CN.md)
+# Perfect-Notifications [English](README.md)
 
 <p align="center">
     <a href="http://perfect.org/get-involved.html" target="_blank">
@@ -42,40 +42,40 @@
     </a>
 </p>
 
-iOS Notifications for Perfect
+Notifications for Perfect 之 iOS消息推送
 
 
-## Issues
+## 问题清单
 
-We are transitioning to using JIRA for all bugs and support related issues, therefore the GitHub issues has been disabled.
+我们目前正在过渡到使用JIRA来处理所有源代码资源合并申请、修复漏洞以及其它有关问题。因此，GitHub 的“issues”问题报告功能已经被禁用了。
 
-If you find a mistake, bug, or any other helpful suggestion you'd like to make on the docs please head over to [http://jira.perfect.org:8080/servicedesk/customer/portal/1](http://jira.perfect.org:8080/servicedesk/customer/portal/1) and raise it.
+如果您发现了问题，或者希望为改进本文提供意见和建议，[请在这里指出](http://jira.perfect.org:8080/servicedesk/customer/portal/1).
 
-A comprehensive list of open issues can be found at [http://jira.perfect.org:8080/projects/ISS/issues](http://jira.perfect.org:8080/projects/ISS/issues)
+在您开始之前，请参阅[目前待解决的问题清单](http://jira.perfect.org:8080/projects/ISS/issues).
 
 
-Building
+编译
 --------
 
-Add this project as a dependency in your Package.swift file.
+请在您的Perfect项目中的Package.swift文件增加以下依存关系：
 
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 .Package(url:"https://github.com/PerfectlySoft/Perfect-Notifications.git", majorVersion: 2, minor: 0)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Usage
+使用方法
 --------
 
 ```swift
-// BEGIN one-time initialization code
-
+// 初始化开始，只需要运行一次即可
+// 配置文件名称，请根据实际需要具体调整
 let configurationName = "My configuration name - can be whatever"
 
 NotificationPusher.addConfigurationIOS(configurationName) {
     (net:NetTCPSSL) in
 
-    // This code will be called whenever a new connection to the APNS service is required.
-    // Configure the SSL related settings.
+    // 以下代码只要有APNS服务连接时都会被调用。
+    // 配置SSL相关设置。
 
     net.keyFilePassword = "if you have password protected key file"
 
@@ -90,14 +90,14 @@ NotificationPusher.addConfigurationIOS(configurationName) {
     }
 }
 
-NotificationPusher.development = true // set to toggle to the APNS sandbox server
+NotificationPusher.development = true // 打开APNS沙箱服务器开关
 
-// END one-time initialization code
+// 初始化结束
 
-// BEGIN - individual notification push
-
+// 以下内容是消息推送实例：
+// deviceId 是一个16进制设备编码
 let deviceId = "hex string device id"
-let ary = [IOSNotificationItem.AlertBody("This is the message"), IOSNotificationItem.Sound("default")]
+let ary = [IOSNotificationItem.AlertBody("在这里发送消息"), IOSNotificationItem.Sound("default")]
 let n = NotificationPusher()
 
 n.apnsTopic = "com.company.my-app"
@@ -105,13 +105,13 @@ n.apnsTopic = "com.company.my-app"
 n.pushIOS(configurationName, deviceToken: deviceId, expiration: 0, priority: 10, notificationItems: ary) {
     response in
 
-    print("NotificationResponse: \(response.code) \(response.body)")
+    print("消息推送返回结果\(response.code) \(response.body)")
 }
 
-// END - individual notification push
+// 消息推送完成
 ```
 
 
 
-## Further Information
-For more information on the Perfect project, please visit [perfect.org](http://perfect.org).
+## 更多内容
+更多内容请参考Perfect项目[perfect.org](http://perfect.org).
