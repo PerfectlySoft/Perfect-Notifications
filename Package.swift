@@ -20,7 +20,11 @@
 import PackageDescription
 
 let urls = [
-    "https://github.com/PerfectlySoft/Perfect-HTTPServer.git"
+	"https://github.com/PerfectlySoft/PerfectLib.git",
+	"https://github.com/PerfectlySoft/Perfect-Thread.git",
+	"https://github.com/PerfectlySoft/Perfect-Net.git",
+	"https://github.com/PerfectlySoft/Perfect-HTTP.git",
+	"https://github.com/PerfectlySoft/Perfect-HTTPServer.git"
 ]
 
 let package = Package(
