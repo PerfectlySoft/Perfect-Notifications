@@ -76,8 +76,7 @@ NotificationPusher.addConfigurationIOS(configurationName) {
 
     net.keyFilePassword = "if you have password protected key file"
 
-    guard net.useCertificateChainFile("path/to/entrust_2048_ca.cer") &&
-        net.useCertificateFile("path/to/aps_development.pem") &&
+    guard net.useCertificateFile("path/to/aps_development.pem") &&
         net.usePrivateKeyFile("path/to/key.pem") &&
         net.checkPrivateKey() else {
 
