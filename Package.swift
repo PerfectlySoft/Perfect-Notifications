@@ -30,5 +30,5 @@ let urls = [
 let package = Package(
     name: "PerfectNotifications",
     targets: [],
-    dependencies: urls.map { .Package(url: $0, majorVersion: 2, minor: 0) }
+    dependencies: urls.map { .Package(url: $0, majorVersion: 2) }
 )
