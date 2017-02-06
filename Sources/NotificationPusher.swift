@@ -22,6 +22,11 @@ import PerfectNet
 import PerfectThread
 import PerfectHTTPServer
 import PerfectHTTP
+#if os(macOS)
+	import Darwin
+#else
+	import SwiftGlibc
+#endif
 
 /**
 Example code:
@@ -38,9 +43,8 @@ Example code:
 
         net.keyFilePassword = "if you have password protected key file"
 
-        guard net.useCertificateChainFile("path/to/entrust_2048_ca.cer") &&
-            net.useCertificateFile("path/to/aps_development.pem") &&
-            net.usePrivateKeyFile("path/to/key.pem") &&
+        guard net.useCertificateFile("path/to/aps_development.pem") &&
+            net.usePrivateKeyFile("path/to/aps_development.pem") &&
             net.checkPrivateKey() else {
 
             let code = Int32(net.errorCode())
@@ -56,10 +60,8 @@ Example code:
     // BEGIN - individual notification push
 
     let deviceId = "hex string device id"
-    let ary = [IOSNotificationItem.AlertBody("This is the message"), IOSNotificationItem.Sound("default")]
-    let n = NotificationPusher()
-
-    n.apnsTopic = "com.company.my-app"
+    let ary = [IOSNotificationItem.alertBody("This is the message"), IOSNotificationItem.sound("default")]
+    let n = NotificationPusher(apnsTopic: "com.company.my-app")
 
     n.pushIOS(configurationName, deviceToken: deviceId, expiration: 0, priority: 10, notificationItems: ary) {
         response in
@@ -123,11 +125,45 @@ struct IOSNotificationError {
 class NotificationConfiguration {
 	
 	let configurator: NotificationPusher.netConfigurator
+	
+	let keyId: String?
+	let teamId: String?
+	let privateKeyPath: String?
+	var currentToken: String?
+	var currentTokenTime = 0
+	
 	let lock = Threading.Lock()
 	var streams = [NotificationHTTP2Client]()
 	
+	var usingJWT: Bool {
+		return nil != keyId
+	}
+	
+	var jwtToken: String? {
+		let oneHour = 60 * 60
+		let now = Int(time(nil))
+		if now - currentTokenTime >= oneHour {
+			guard let keyId = keyId, let teamId = teamId, let privateKeyPath = privateKeyPath else {
+				return nil
+			}
+			currentTokenTime = now
+			currentToken = makeSignature(keyId: keyId, teamId: teamId, privateKeyPath: privateKeyPath)
+		}
+		return currentToken
+	}
+	
 	init(configurator: @escaping NotificationPusher.netConfigurator) {
 		self.configurator = configurator
+		keyId = nil
+		teamId = nil
+		privateKeyPath = nil
+	}
+	
+	init(keyId: String, teamId: String, privateKeyPath: String) {
+		configurator = { _ in }
+		self.keyId = keyId
+		self.teamId = teamId
+		self.privateKeyPath = privateKeyPath
 	}
 }
 
@@ -141,7 +177,7 @@ class NotificationHTTP2Client: HTTP2Client {
 }
 
 /// The response object given after a push attempt.
-public struct NotificationResponse {
+public struct NotificationResponse: CustomStringConvertible {
 	/// The response code for the request.
 	public let status: HTTPResponseStatus
 	/// The response body data bytes.
@@ -159,6 +195,10 @@ public struct NotificationResponse {
 	/// The body data bytes converted to String.
 	public var stringBody: String {
 		return UTF8Encoding.encode(bytes: self.body)
+	}
+	
+	public var description: String {
+		return "\(status): \(stringBody)"
 	}
 }
 
@@ -191,28 +231,43 @@ public class NotificationPusher {
 	static var iosConfigurations = [String:NotificationConfiguration]()
 	static var activeStreams = [Int:NotificationHTTP2Client]()
 	
-	/// Add a configuration given a name and a callback.
-	/// A particular configuration will generally correspond to an individual app.
-	/// The configuration callback will be called each time a new connection is initiated to the APNS.
-	/// Within the callback you will want to set:
-	/// 1. Path to chain file as provided by Apple: net.useCertificateChainFile("path/to/entrust_2048_ca.cer")
-	/// 2. Path to push notification certificate as obtained from Apple: net.useCertificateFile("path/to/aps.pem")
-	/// 3a. Password for the certificate's private key file, if it is password protected: net.keyFilePassword = "password"
-	/// 3b. Path to the certificate's private key file: net.usePrivateKeyFile("path/to/key.pem")
-	public static func addConfigurationIOS(name nam: String, configurator: @escaping netConfigurator) {
+	public static func addConfigurationIOS(name: String, configurator: @escaping netConfigurator = { _ in }) {
 		self.configurationsLock.doWithLock {
-			self.iosConfigurations[nam] = NotificationConfiguration(configurator: configurator)
+			self.iosConfigurations[name] = NotificationConfiguration(configurator: configurator)
 		}
 	}
 	
-	static func getStreamIOS(configurationName configuration: String, callback: @escaping (HTTP2Client?) -> ()) {
-		
+	public static func addConfigurationIOS(name: String, certificatePath: String) {
+		addConfigurationIOS(name: name) {
+			net in
+
+			guard File(certificatePath).exists else {
+				fatalError("File not found \(certificatePath)")
+			}
+			guard net.useCertificateFile(cert: certificatePath)
+				&& net.usePrivateKeyFile(cert: certificatePath)
+				&& net.checkPrivateKey()
+				  else {
+					let code = Int32(net.errorCode())
+					print("Error validating private key file: \(net.errorStr(forCode: code))")
+					return
+			}
+		}
+	}
+	
+	public static func addConfigurationIOS(name: String, keyId: String, teamId: String, privateKeyPath: String) {
+		self.configurationsLock.doWithLock {
+			self.iosConfigurations[name] = NotificationConfiguration(keyId: keyId, teamId: teamId, privateKeyPath: privateKeyPath)
+		}
+	}
+	
+	static func getStreamIOS(configurationName configuration: String, callback: @escaping (HTTP2Client?, NotificationConfiguration?) -> ()) {
 		var conf: NotificationConfiguration?
 		self.configurationsLock.doWithLock {
 			conf = self.iosConfigurations[configuration]
 		}
         guard let c = conf else {
-            return callback(nil)
+            return callback(nil, nil)
         }
         var net: NotificationHTTP2Client?
         var needsConnect = false
@@ -227,16 +282,17 @@ public class NotificationPusher {
             }
         }
         guard needsConnect else {
-            callback(net)
+            callback(net, c)
             return
         }
-        c.configurator(net!.net)
-        net!.connect(host: self.notificationHostIOS, port: iosNotificationPort, ssl: true, timeoutSeconds: 5.0) {
+		
+		net?.net.initializedCallback = c.configurator
+        net?.connect(host: self.notificationHostIOS, port: iosNotificationPort, ssl: true, timeoutSeconds: 5.0) {
             b in
             if b {
-                callback(net!)
+                callback(net!, c)
             } else {
-                callback(nil)
+                callback(nil, nil)
             }
         }
 	}
@@ -282,25 +338,7 @@ public class NotificationPusher {
 	/// Provide a list of IOSNotificationItems.
 	/// Provide a callback with which to receive the response.
 	public func pushIOS(configurationName: String, deviceToken: String, expiration: UInt32, priority: UInt8, notificationItems: [IOSNotificationItem], callback: @escaping (NotificationResponse) -> ()) {
-		
-		NotificationPusher.getStreamIOS(configurationName: configurationName) {
-			client in
-            guard let c = client else {
-                callback(NotificationResponse(status: .internalServerError, body: [UInt8]()))
-                return
-            }
-            self.pushIOS(c, deviceTokens: [deviceToken], expiration: expiration, priority: priority, notificationItems: notificationItems) {
-                responses in
-                
-                NotificationPusher.releaseStreamIOS(configurationName: configurationName, net: c)
-                
-                guard responses.count == 1 else {
-                    callback(NotificationResponse(status: .internalServerError, body: [UInt8]()))
-                    return
-                }
-                callback(responses.first!)
-            }
-		}
+		pushIOS(configurationName: configurationName, deviceTokens: [deviceToken], expiration: expiration, priority: priority, notificationItems: notificationItems, callback: { lst in callback(lst.first!) })
 	}
 	
 	/// Push one message to multiple devices.
@@ -312,17 +350,17 @@ public class NotificationPusher {
 	public func pushIOS(configurationName: String, deviceTokens: [String], expiration: UInt32, priority: UInt8, notificationItems: [IOSNotificationItem], callback: @escaping ([NotificationResponse]) -> ()) {
 		
 		NotificationPusher.getStreamIOS(configurationName: configurationName) {
-			client in
-            guard let c = client else {
+			client, config in
+            guard let c = client, let config = config else {
                 callback([NotificationResponse(status: .internalServerError, body: [UInt8]())])
                 return
             }
-            self.pushIOS(c, deviceTokens: deviceTokens, expiration: expiration, priority: priority, notificationItems: notificationItems) {
+			self.pushIOS(c, config: config, deviceTokens: deviceTokens, expiration: expiration, priority: priority, notificationItems: notificationItems) {
                 responses in
                 
                 NotificationPusher.releaseStreamIOS(configurationName: configurationName, net: c)
                 
-                guard responses.count == 1 else {
+                guard responses.count == deviceTokens.count else {
                     callback([NotificationResponse(status: .internalServerError, body: [UInt8]())])
                     return
                 }
@@ -331,7 +369,7 @@ public class NotificationPusher {
 		}
 	}
 	
-	func pushIOS(_ net: HTTP2Client, deviceToken: String, expiration: UInt32, priority: UInt8, notificationJson: [UInt8], callback: @escaping (NotificationResponse) -> ()) {
+	func pushIOS(_ net: HTTP2Client, config: NotificationConfiguration, deviceToken: String, expiration: UInt32, priority: UInt8, notificationJson: [UInt8], callback: @escaping (NotificationResponse) -> ()) {
 		
 		let request = net.createRequest()
 		request.method = .post
@@ -339,9 +377,15 @@ public class NotificationPusher {
         request.setHeader(.contentType, value: "application/json; charset=utf-8")
         request.setHeader(.custom(name: "apns-expiration"), value: "\(expiration)")
         request.setHeader(.custom(name: "apns-priority"), value: "\(priority)")
+		
 		if let apnsTopic = apnsTopic {
             request.setHeader(.custom(name: "apns-topic"), value: apnsTopic)
 		}
+		
+		if config.usingJWT, let token = config.jwtToken {
+			request.setHeader(.authorization, value: "bearer \(token)")
+		}
+		
 		request.path = "/3/device/\(deviceToken)"
 		net.sendRequest(request) {
 			response, msg in
@@ -351,30 +395,29 @@ public class NotificationPusher {
                 return
             }
             callback(NotificationResponse(status: r.status, body: r.bodyBytes))
-            
 		}
 	}
 	
-	func pushIOS(_ client: HTTP2Client, deviceTokens: ComponentGenerator, expiration: UInt32, priority: UInt8, notificationJson: [UInt8], callback: @escaping ([NotificationResponse]) -> ()) {
+	func pushIOS(_ client: HTTP2Client, config: NotificationConfiguration, deviceTokens: ComponentGenerator, expiration: UInt32, priority: UInt8, notificationJson: [UInt8], callback: @escaping ([NotificationResponse]) -> ()) {
 		var g = deviceTokens
         guard let next = g.next() else {
             callback(self.responses)
             return
         }
-        pushIOS(client, deviceToken: next, expiration: expiration, priority: priority, notificationJson: notificationJson) {
+		pushIOS(client, config: config, deviceToken: next, expiration: expiration, priority: priority, notificationJson: notificationJson) {
             response in
             
             self.responses.append(response)
             
-            self.pushIOS(client, deviceTokens: g, expiration: expiration, priority: priority, notificationJson: notificationJson, callback: callback)
+			self.pushIOS(client, config: config, deviceTokens: g, expiration: expiration, priority: priority, notificationJson: notificationJson, callback: callback)
         }
 	}
 	
-	func pushIOS(_ client: HTTP2Client, deviceTokens: [String], expiration: UInt32, priority: UInt8, notificationItems: [IOSNotificationItem], callback: @escaping ([NotificationResponse]) -> ()) {
+	func pushIOS(_ client: HTTP2Client, config: NotificationConfiguration, deviceTokens: [String], expiration: UInt32, priority: UInt8, notificationItems: [IOSNotificationItem], callback: @escaping ([NotificationResponse]) -> ()) {
 		self.resetResponses()
 		let g = deviceTokens.makeIterator()
 		let jsond = UTF8Encoding.decode(string: self.itemsToPayloadString(notificationItems: notificationItems))
-		self.pushIOS(client, deviceTokens: g, expiration: expiration, priority: priority, notificationJson: jsond, callback: callback)
+		self.pushIOS(client, config: config, deviceTokens: g, expiration: expiration, priority: priority, notificationJson: jsond, callback: callback)
 	}
 	
 	func itemsToPayloadString(notificationItems items: [IOSNotificationItem]) -> String {
