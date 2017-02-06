@@ -22,61 +22,15 @@ import PerfectNet
 import PerfectThread
 import PerfectHTTPServer
 import PerfectHTTP
+import Foundation
 #if os(macOS)
 	import Darwin
 #else
 	import SwiftGlibc
 #endif
 
-/**
-Example code:
-
-    // BEGIN one-time initialization code
-
-    let configurationName = "My configuration name - can be whatever"
-
-    NotificationPusher.addConfigurationIOS(configurationName) {
-        (net:NetTCPSSL) in
-
-        // This code will be called whenever a new connection to the APNS service is required.
-        // Configure the SSL related settings.
-
-        net.keyFilePassword = "if you have password protected key file"
-
-        guard net.useCertificateFile("path/to/aps_development.pem") &&
-            net.usePrivateKeyFile("path/to/aps_development.pem") &&
-            net.checkPrivateKey() else {
-
-            let code = Int32(net.errorCode())
-            print("Error validating private key file: \(net.errorStr(code))")
-            return
-        }
-    }
-
-    NotificationPusher.development = true // set to toggle to the APNS sandbox server
-
-    // END one-time initialization code
-
-    // BEGIN - individual notification push
-
-    let deviceId = "hex string device id"
-    let ary = [IOSNotificationItem.alertBody("This is the message"), IOSNotificationItem.sound("default")]
-    let n = NotificationPusher(apnsTopic: "com.company.my-app")
-
-    n.pushIOS(configurationName, deviceToken: deviceId, expiration: 0, priority: 10, notificationItems: ary) {
-        response in
-
-        print("NotificationResponse: \(response.code) \(response.body)")
-    }
-
-    // END - individual notification push
-
-*/
-
 /// Items to configure an individual notification push.
-/// These correspond to what is described here:
-/// https://developer.apple.com/library/mac/documentation/NetworkingInternet/Conceptual/RemoteNotificationsPG/Chapters/TheNotificationPayload.html
-public enum IOSNotificationItem {
+public enum APNSNotificationItem {
     /// alert body child property
 	case alertBody(String)
     /// alert title child property
@@ -95,32 +49,51 @@ public enum IOSNotificationItem {
 	case sound(String)
     /// aps content-available key
 	case contentAvailable
-    /// aps category key
+	/// aps category key
 	case category(String)
+	/// aps thread-id key
+	case threadId(String)
     /// custom payload data
 	case customPayload(String, Any)
     /// apn mutable-content key
     case mutableContent
 }
 
-enum IOSItemId: UInt8 {
-	case deviceToken = 1
-	case payload = 2
-	case notificationIdentifier = 3
-	case expirationDate = 4
-	case priority = 5
+/// Valid APNS priorities
+public enum APNSPriority: Int {
+	case immediate = 10
+	case background = 5
 }
 
-private let iosDeviceIdLength = 32
-private let iosNotificationCommand = UInt8(2)
+/// Time in the future when the notification, if has not be able to be delivered, will expire.
+public enum APNSExpiration {
+	/// Discard the notification if it can't be immediately delivered.
+	case immediate
+	/// now + seconds
+	case relative(Int)
+	/// absolute UTC time since epoch
+	case absolute(Int)
+	
+	var rawValue: Int {
+		switch self {
+		case .immediate: return 0
+		case .relative(let v): return Int(time(nil)) + v
+		case .absolute(let v): return v
+		}
+	}
+	// TODO: deprecate
+	init?(rawValue: Int) {
+		self = .absolute(rawValue)
+	}
+}
+
+public typealias APNSUUID = Foundation.UUID
+
+typealias IOSNotificationItem = APNSNotificationItem
+
 private let iosNotificationPort = UInt16(443)
 private let iosNotificationDevelopmentHost = "api.development.push.apple.com"
 private let iosNotificationProductionHost = "api.push.apple.com"
-
-struct IOSNotificationError {
-	let code: UInt8
-	let identifier: UInt32
-}
 
 class NotificationConfiguration {
 	
@@ -129,6 +102,7 @@ class NotificationConfiguration {
 	let keyId: String?
 	let teamId: String?
 	let privateKeyPath: String?
+	let production: Bool
 	var currentToken: String?
 	var currentTokenTime = 0
 	
@@ -152,18 +126,31 @@ class NotificationConfiguration {
 		return currentToken
 	}
 	
-	init(configurator: @escaping NotificationPusher.netConfigurator) {
+	var notificationHostAPNS: String {
+		// for compatability: if global debug was turned ON then respect it
+		if NotificationPusher.development {
+			return iosNotificationDevelopmentHost
+		}
+		if production {
+			return iosNotificationProductionHost
+		}
+		return iosNotificationDevelopmentHost
+	}
+	
+	init(configurator: @escaping NotificationPusher.netConfigurator, production: Bool) {
 		self.configurator = configurator
 		keyId = nil
 		teamId = nil
+		self.production = production
 		privateKeyPath = nil
 	}
 	
-	init(keyId: String, teamId: String, privateKeyPath: String) {
+	init(keyId: String, teamId: String, privateKeyPath: String, production: Bool) {
 		configurator = { _ in }
 		self.keyId = keyId
 		self.teamId = teamId
 		self.privateKeyPath = privateKeyPath
+		self.production = production
 	}
 }
 
@@ -211,33 +198,41 @@ public class NotificationPusher {
 	public typealias netConfigurator = (NetTCPSSL) -> ()
 	
 	/// Toggle development or production on a global basis.
+	// TODO: deprecate
 	public static var development = false
 
 	/// Sets the apns-topic which will be used for iOS notifications.
-	public var apnsTopic: String?
-
+	public var apnsTopic: String
+	public var expiration: APNSExpiration
+	public var priority: APNSPriority
+	public var collapseId: String?
+	
 	var responses = [NotificationResponse]()
 	
 	static var idCounter = 0
-	
-	static var notificationHostIOS: String {
-		if self.development {
-			return iosNotificationDevelopmentHost
-		}
-		return iosNotificationProductionHost
-	}
 	
 	static let configurationsLock = Threading.Lock()
 	static var iosConfigurations = [String:NotificationConfiguration]()
 	static var activeStreams = [Int:NotificationHTTP2Client]()
 	
-	public static func addConfigurationIOS(name: String, configurator: @escaping netConfigurator = { _ in }) {
+	/// Initialize given an apns-topic string.
+	public init(apnsTopic: String,
+	            expiration: APNSExpiration = .immediate,
+	            priority: APNSPriority = .immediate,
+	            collapseId: String? = nil) {
+		self.apnsTopic = apnsTopic
+		self.expiration = expiration
+		self.priority = priority
+		self.collapseId = collapseId
+	}
+	
+	public static func addConfigurationAPNS(name: String, production: Bool, configurator: @escaping netConfigurator = { _ in }) {
 		self.configurationsLock.doWithLock {
-			self.iosConfigurations[name] = NotificationConfiguration(configurator: configurator)
+			self.iosConfigurations[name] = NotificationConfiguration(configurator: configurator, production: production)
 		}
 	}
 	
-	public static func addConfigurationIOS(name: String, certificatePath: String) {
+	public static func addConfigurationAPNS(name: String, production: Bool, certificatePath: String) {
 		addConfigurationIOS(name: name) {
 			net in
 
@@ -255,13 +250,7 @@ public class NotificationPusher {
 		}
 	}
 	
-	public static func addConfigurationIOS(name: String, keyId: String, teamId: String, privateKeyPath: String) {
-		self.configurationsLock.doWithLock {
-			self.iosConfigurations[name] = NotificationConfiguration(keyId: keyId, teamId: teamId, privateKeyPath: privateKeyPath)
-		}
-	}
-	
-	static func getStreamIOS(configurationName configuration: String, callback: @escaping (HTTP2Client?, NotificationConfiguration?) -> ()) {
+	static func getStreamAPNS(configurationName configuration: String, callback: @escaping (HTTP2Client?, NotificationConfiguration?) -> ()) {
 		var conf: NotificationConfiguration?
 		self.configurationsLock.doWithLock {
 			conf = self.iosConfigurations[configuration]
@@ -287,7 +276,7 @@ public class NotificationPusher {
         }
 		
 		net?.net.initializedCallback = c.configurator
-        net?.connect(host: self.notificationHostIOS, port: iosNotificationPort, ssl: true, timeoutSeconds: 5.0) {
+        net?.connect(host: c.notificationHostAPNS, port: iosNotificationPort, ssl: true, timeoutSeconds: 5.0) {
             b in
             if b {
                 callback(net!, c)
@@ -297,7 +286,7 @@ public class NotificationPusher {
         }
 	}
 	
-	static func releaseStreamIOS(configurationName configuration: String, net: HTTP2Client) {
+	static func releaseStreamAPNS(configurationName configuration: String, net: HTTP2Client) {
 		var conf: NotificationConfiguration?
 		self.configurationsLock.doWithLock {
 			conf = self.iosConfigurations[configuration]
@@ -315,71 +304,22 @@ public class NotificationPusher {
             }
         }
 	}
-	
-    /// Public initializer
-	public init() {
-
-	}
-
-	/// Initialize given iOS apns-topic string.
-	/// This can be set after initialization on the X.apnsTopic property.
-	public init(apnsTopic: String) {
-		self.apnsTopic = apnsTopic
-	}
 
 	func resetResponses() {
 		self.responses.removeAll()
 	}
 	
-	/// Push one message to one device.
-	/// Provide the previously set configuration name, device token.
-	/// Provide the expiration and priority as described here:
-	///		https://developer.apple.com/library/mac/documentation/NetworkingInternet/Conceptual/RemoteNotificationsPG/Chapters/APNsProviderAPI.html
-	/// Provide a list of IOSNotificationItems.
-	/// Provide a callback with which to receive the response.
-	public func pushIOS(configurationName: String, deviceToken: String, expiration: UInt32, priority: UInt8, notificationItems: [IOSNotificationItem], callback: @escaping (NotificationResponse) -> ()) {
-		pushIOS(configurationName: configurationName, deviceTokens: [deviceToken], expiration: expiration, priority: priority, notificationItems: notificationItems, callback: { lst in callback(lst.first!) })
-	}
-	
-	/// Push one message to multiple devices.
-	/// Provide the previously set configuration name, and zero or more device tokens. The same message will be sent to each device.
-	/// Provide the expiration and priority as described here:
-	///		https://developer.apple.com/library/mac/documentation/NetworkingInternet/Conceptual/RemoteNotificationsPG/Chapters/APNsProviderAPI.html
-	/// Provide a list of IOSNotificationItems.
-	/// Provide a callback with which to receive the responses.
-	public func pushIOS(configurationName: String, deviceTokens: [String], expiration: UInt32, priority: UInt8, notificationItems: [IOSNotificationItem], callback: @escaping ([NotificationResponse]) -> ()) {
-		
-		NotificationPusher.getStreamIOS(configurationName: configurationName) {
-			client, config in
-            guard let c = client, let config = config else {
-                callback([NotificationResponse(status: .internalServerError, body: [UInt8]())])
-                return
-            }
-			self.pushIOS(c, config: config, deviceTokens: deviceTokens, expiration: expiration, priority: priority, notificationItems: notificationItems) {
-                responses in
-                
-                NotificationPusher.releaseStreamIOS(configurationName: configurationName, net: c)
-                
-                guard responses.count == deviceTokens.count else {
-                    callback([NotificationResponse(status: .internalServerError, body: [UInt8]())])
-                    return
-                }
-                callback(responses)
-            }
-		}
-	}
-	
-	func pushIOS(_ net: HTTP2Client, config: NotificationConfiguration, deviceToken: String, expiration: UInt32, priority: UInt8, notificationJson: [UInt8], callback: @escaping (NotificationResponse) -> ()) {
+	func pushAPNS(_ net: HTTP2Client, config: NotificationConfiguration, deviceToken: String, notificationJson: [UInt8], callback: @escaping (NotificationResponse) -> ()) {
 		
 		let request = net.createRequest()
 		request.method = .post
 		request.postBodyBytes = notificationJson
         request.setHeader(.contentType, value: "application/json; charset=utf-8")
-        request.setHeader(.custom(name: "apns-expiration"), value: "\(expiration)")
-        request.setHeader(.custom(name: "apns-priority"), value: "\(priority)")
-		
-		if let apnsTopic = apnsTopic {
-            request.setHeader(.custom(name: "apns-topic"), value: apnsTopic)
+        request.setHeader(.custom(name: "apns-expiration"), value: "\(expiration.rawValue)")
+        request.setHeader(.custom(name: "apns-priority"), value: "\(priority.rawValue)")
+		request.setHeader(.custom(name: "apns-topic"), value: apnsTopic)
+		if let cid = self.collapseId {
+			request.setHeader(.custom(name: "apns-collapse-id"), value: cid)
 		}
 		
 		if config.usingJWT, let token = config.jwtToken {
@@ -398,29 +338,27 @@ public class NotificationPusher {
 		}
 	}
 	
-	func pushIOS(_ client: HTTP2Client, config: NotificationConfiguration, deviceTokens: ComponentGenerator, expiration: UInt32, priority: UInt8, notificationJson: [UInt8], callback: @escaping ([NotificationResponse]) -> ()) {
+	func pushAPNS(_ client: HTTP2Client, config: NotificationConfiguration, deviceTokens: ComponentGenerator, notificationJson: [UInt8], callback: @escaping ([NotificationResponse]) -> ()) {
 		var g = deviceTokens
         guard let next = g.next() else {
             callback(self.responses)
             return
         }
-		pushIOS(client, config: config, deviceToken: next, expiration: expiration, priority: priority, notificationJson: notificationJson) {
+		pushAPNS(client, config: config, deviceToken: next, notificationJson: notificationJson) {
             response in
-            
             self.responses.append(response)
-            
-			self.pushIOS(client, config: config, deviceTokens: g, expiration: expiration, priority: priority, notificationJson: notificationJson, callback: callback)
+			self.pushAPNS(client, config: config, deviceTokens: g, notificationJson: notificationJson, callback: callback)
         }
 	}
 	
-	func pushIOS(_ client: HTTP2Client, config: NotificationConfiguration, deviceTokens: [String], expiration: UInt32, priority: UInt8, notificationItems: [IOSNotificationItem], callback: @escaping ([NotificationResponse]) -> ()) {
+	func pushAPNS(_ client: HTTP2Client, config: NotificationConfiguration, deviceTokens: [String], notificationItems: [APNSNotificationItem], callback: @escaping ([NotificationResponse]) -> ()) {
 		self.resetResponses()
 		let g = deviceTokens.makeIterator()
 		let jsond = UTF8Encoding.decode(string: self.itemsToPayloadString(notificationItems: notificationItems))
-		self.pushIOS(client, config: config, deviceTokens: g, expiration: expiration, priority: priority, notificationJson: jsond, callback: callback)
+		self.pushAPNS(client, config: config, deviceTokens: g, notificationJson: jsond, callback: callback)
 	}
 	
-	func itemsToPayloadString(notificationItems items: [IOSNotificationItem]) -> String {
+	func itemsToPayloadString(notificationItems items: [APNSNotificationItem]) -> String {
 		var dict = [String:Any]()
 		var aps = [String:Any]()
 		var alert = [String:Any]()
@@ -454,6 +392,8 @@ public class NotificationPusher {
 				aps["content-available"] = 1
 			case .category(let s):
 				aps["category"] = s
+			case .threadId(let s):
+				aps["thread-id"] = s
 			case .customPayload(let s, let a):
 				dict[s] = a
             case .mutableContent:
@@ -477,6 +417,84 @@ public class NotificationPusher {
 		catch {}
 		return "{}"
 	}
+	
+	// TODO: deprecate
+	public convenience init() {
+		self.init(apnsTopic: "")
+	}
+}
+
+public extension NotificationPusher {
+	/// Add an APNS configuration which can be later used to push notifications.
+	public static func addConfigurationAPNS(name: String, production: Bool, keyId: String, teamId: String, privateKeyPath: String) {
+		self.configurationsLock.doWithLock {
+			self.iosConfigurations[name] = NotificationConfiguration(keyId: keyId, teamId: teamId, privateKeyPath: privateKeyPath, production: production)
+		}
+	}
+}
+
+public extension NotificationPusher {
+	/// Push one message to one device.
+	/// Provide the previously set configuration name, device token.
+	/// Provide the expiration and priority as described here:
+	///		https://developer.apple.com/library/mac/documentation/NetworkingInternet/Conceptual/RemoteNotificationsPG/Chapters/APNsProviderAPI.html
+	/// Provide a list of APNSNotificationItems.
+	/// Provide a callback with which to receive the response.
+	public func pushAPNS(configurationName: String, deviceToken: String, notificationItems: [APNSNotificationItem], callback: @escaping (NotificationResponse) -> ()) {
+		pushAPNS(configurationName: configurationName, deviceTokens: [deviceToken], notificationItems: notificationItems, callback: { lst in callback(lst.first!) })
+	}
+	
+	/// Push one message to multiple devices.
+	/// Provide the previously set configuration name, and zero or more device tokens. The same message will be sent to each device.
+	/// Provide the expiration and priority as described here:
+	///		https://developer.apple.com/library/mac/documentation/NetworkingInternet/Conceptual/RemoteNotificationsPG/Chapters/APNsProviderAPI.html
+	/// Provide a list of APNSNotificationItems.
+	/// Provide a callback with which to receive the responses.
+	public func pushAPNS(configurationName: String, deviceTokens: [String],
+	                     notificationItems: [APNSNotificationItem],
+	                     callback: @escaping ([NotificationResponse]) -> ()) {
+		
+		NotificationPusher.getStreamAPNS(configurationName: configurationName) {
+			client, config in
+			guard let c = client, let config = config else {
+				callback([NotificationResponse(status: .internalServerError, body: [UInt8]())])
+				return
+			}
+			self.pushAPNS(c, config: config, deviceTokens: deviceTokens, notificationItems: notificationItems) {
+				responses in
+				
+				NotificationPusher.releaseStreamAPNS(configurationName: configurationName, net: c)
+				
+				guard responses.count == deviceTokens.count else {
+					callback([NotificationResponse(status: .internalServerError, body: [UInt8]())])
+					return
+				}
+				callback(responses)
+			}
+		}
+	}
+}
+
+public extension NotificationPusher {
+	// TODO: deprecate
+	public static func addConfigurationIOS(name: String, configurator: @escaping netConfigurator = { _ in }) {
+		addConfigurationAPNS(name: name, production: NotificationPusher.development, configurator: configurator)
+	}
+	public static func addConfigurationIOS(name: String, certificatePath: String) {
+		addConfigurationAPNS(name: name, production: NotificationPusher.development, certificatePath: certificatePath)
+	}
+	public static func addConfigurationIOS(name: String, keyId: String, teamId: String, privateKeyPath: String) {
+		addConfigurationAPNS(name: name, production: NotificationPusher.development, keyId: keyId, teamId: teamId, privateKeyPath: privateKeyPath)
+	}
+	public func pushIOS(configurationName: String, deviceToken: String, expiration: UInt32, priority: UInt8, notificationItems: [APNSNotificationItem], callback: @escaping (NotificationResponse) -> ()) {
+		pushIOS(configurationName: configurationName, deviceTokens: [deviceToken], expiration: expiration, priority: priority, notificationItems: notificationItems, callback: { lst in callback(lst.first!) })
+	}
+	public func pushIOS(configurationName: String, deviceTokens: [String], expiration: UInt32, priority: UInt8, notificationItems: [APNSNotificationItem], callback: @escaping ([NotificationResponse]) -> ()) {
+		self.expiration = APNSExpiration(rawValue: Int(expiration)) ?? .immediate
+		self.priority = APNSPriority(rawValue: Int(priority)) ?? .immediate
+		self.pushAPNS(configurationName: configurationName, deviceTokens: deviceTokens, notificationItems: notificationItems, callback: callback)
+	}
+	//
 }
 
 // !FIX! Downcasting to protocol does not work on Linux
