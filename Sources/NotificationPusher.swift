@@ -427,6 +427,9 @@ public class NotificationPusher {
 public extension NotificationPusher {
 	/// Add an APNS configuration which can be later used to push notifications.
 	public static func addConfigurationAPNS(name: String, production: Bool, keyId: String, teamId: String, privateKeyPath: String) {
+		guard File(privateKeyPath).exists else {
+			fatalError("The private key file \"\(privateKeyPath)\" does not exist. Current working directory: \(Dir.workingDir)")
+		}
 		self.configurationsLock.doWithLock {
 			self.iosConfigurations[name] = NotificationConfiguration(keyId: keyId, teamId: teamId, privateKeyPath: privateKeyPath, production: production)
 		}

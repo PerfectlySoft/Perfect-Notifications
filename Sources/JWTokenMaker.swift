@@ -42,11 +42,13 @@ func encodeBase64URL(_ j: JSONConvertible) throws -> String? {
 }
 
 func getPrivKey(_ privateKeyPath: String) -> BIGNUM? {
+	guard let fp = fopen(privateKeyPath, "r") else {
+		return nil
+	}
 	var keyPtr = EVP_PKEY_new()
 	defer {
 		EVP_PKEY_free(keyPtr)
 	}
-	let fp = fopen(privateKeyPath, "r")
 	PEM_read_PrivateKey(fp, &keyPtr, nil, nil) // nil pw callback
 	fclose(fp)
 	guard let ecKey = EVP_PKEY_get1_EC_KEY(keyPtr) else {
