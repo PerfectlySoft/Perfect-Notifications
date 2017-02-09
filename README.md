@@ -100,14 +100,14 @@ let notificationsAppId = "my.app.id"
 
 let apnsKeyIdentifier = "AB90CD56XY"
 let apnsTeamIdentifier = "YX65DC09BA"
-let apnsPrivateKey = "APNSAuthKey_AB90CD56XY.p8"
+let apnsPrivateKeyFilePath = "./APNSAuthKey_AB90CD56XY.p8"
 
 NotificationPusher.addConfigurationAPNS(
 	name: notificationsTestId, 
 	production: false, // should be false when running pre-release app in debugger
 	keyId: apnsKeyIdentifier, 
 	teamId: apnsTeamIdentifier, 
-	privateKeyPath: apnsPrivateKey)
+	privateKeyPath: apnsPrivateKeyFilePath)
 ```
 
 After the configuration has been added, notifications can be sent at any point. To do so, create a `NotificationPusher` with your app id, or "topic", then trigger a notification to one or more devices by calling its `pushAPNS` function:
