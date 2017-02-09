@@ -90,7 +90,7 @@ To send notifications from your server your must have three pieces of informatio
 
 These four pieces of information are used to perform push notifications. This information must reside on your server. You can store this information in any manner provided it can be used by the server. For simplicity, the rest of this example assumes that the private key file is in the server's working directory and that the two keys and the app id are embedded in the Swift code.
 
-In your server Swift code, you must `import PerfectNotifications`. Then, before you start any HTTP servers or send any notifications you must add a "configuration" for the notifications you will be sending. This very simply ties your APNs keys to a name which you can then use later when push notifications.
+In your server Swift code, you must `import PerfectNotifications`. Then, before you start any HTTP servers or send any notifications you must add a "configuration" for the notifications you will be sending. This very simply ties your APNs keys to a name which you can then use later when pushing notifications.
 
 ```swift
 import PerfectNotifications
