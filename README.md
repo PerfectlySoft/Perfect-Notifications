@@ -104,7 +104,7 @@ let apnsPrivateKey = "APNSAuthKey_AB90CD56XY.p8"
 
 NotificationPusher.addConfigurationAPNS(
 	name: notificationsTestId, 
-	production: Bool, // should be false when running pre-release app in debugger
+	production: false, // should be false when running pre-release app in debugger
 	keyId: apnsKeyIdentifier, 
 	teamId: apnsTeamIdentifier, 
 	privateKeyPath: apnsPrivateKey)
