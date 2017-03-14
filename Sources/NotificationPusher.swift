@@ -22,7 +22,9 @@ import PerfectNet
 import PerfectThread
 import PerfectHTTPServer
 import PerfectHTTP
+import PerfectCrypto
 import Foundation
+
 #if os(macOS)
 	import Darwin
 #else
@@ -427,6 +429,7 @@ public class NotificationPusher {
 public extension NotificationPusher {
 	/// Add an APNS configuration which can be later used to push notifications.
 	public static func addConfigurationAPNS(name: String, production: Bool, keyId: String, teamId: String, privateKeyPath: String) {
+		_ = PerfectCrypto.isInitialized
 		guard File(privateKeyPath).exists else {
 			fatalError("The private key file \"\(privateKeyPath)\" does not exist. Current working directory: \(Dir.workingDir.path)")
 		}
