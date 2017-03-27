@@ -484,13 +484,13 @@ public extension NotificationPusher {
 public extension NotificationPusher {
 	// TODO: deprecate
 	public static func addConfigurationIOS(name: String, configurator: @escaping netConfigurator = { _ in }) {
-		addConfigurationAPNS(name: name, production: NotificationPusher.development, configurator: configurator)
+		addConfigurationAPNS(name: name, production: !NotificationPusher.development, configurator: configurator)
 	}
 	public static func addConfigurationIOS(name: String, certificatePath: String) {
-		addConfigurationAPNS(name: name, production: NotificationPusher.development, certificatePath: certificatePath)
+		addConfigurationAPNS(name: name, production: !NotificationPusher.development, certificatePath: certificatePath)
 	}
 	public static func addConfigurationIOS(name: String, keyId: String, teamId: String, privateKeyPath: String) {
-		addConfigurationAPNS(name: name, production: NotificationPusher.development, keyId: keyId, teamId: teamId, privateKeyPath: privateKeyPath)
+		addConfigurationAPNS(name: name, production: !NotificationPusher.development, keyId: keyId, teamId: teamId, privateKeyPath: privateKeyPath)
 	}
 	public func pushIOS(configurationName: String, deviceToken: String, expiration: UInt32, priority: UInt8, notificationItems: [APNSNotificationItem], callback: @escaping (NotificationResponse) -> ()) {
 		pushIOS(configurationName: configurationName, deviceTokens: [deviceToken], expiration: expiration, priority: priority, notificationItems: notificationItems, callback: { lst in callback(lst.first!) })
