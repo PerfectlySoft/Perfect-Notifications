@@ -333,7 +333,7 @@ public class NotificationPusher {
 			response, msg in
 			
             guard let r = response else {
-                callback(NotificationResponse(status: .internalServerError, body: UTF8Encoding.decode(string: "No response")))
+                callback(NotificationResponse(status: .internalServerError, body: UTF8Encoding.decode(string: msg ?? "No response")))
                 return
             }
             callback(NotificationResponse(status: r.status, body: r.bodyBytes))
