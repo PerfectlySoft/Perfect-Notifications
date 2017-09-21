@@ -23,7 +23,7 @@
 
 <p align="center">
     <a href="https://developer.apple.com/swift/" target="_blank">
-        <img src="https://img.shields.io/badge/Swift-3.0-orange.svg?style=flat" alt="Swift 3.0">
+        <img src="https://img.shields.io/badge/Swift-4.0-orange.svg?style=flat" alt="Swift 4.0">
     </a>
     <a href="https://developer.apple.com/swift/" target="_blank">
         <img src="https://img.shields.io/badge/Platforms-OS%20X%20%7C%20Linux%20-lightgray.svg?style=flat" alt="Platforms OS X | Linux">
@@ -57,7 +57,7 @@ Building
 This is a Swift Package manager based project. Add this repository as a dependency in your Package.swift file.
 
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-.Package(url:"https://github.com/PerfectlySoft/Perfect-Notifications.git", majorVersion: 2)
+.Package(url:"https://github.com/PerfectlySoft/Perfect-Notifications.git", majorVersion: 3)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Overview
@@ -100,7 +100,7 @@ let notificationsAppId = "my.app.id"
 
 let apnsKeyIdentifier = "AB90CD56XY"
 let apnsTeamIdentifier = "YX65DC09BA"
-let apnsPrivateKeyFilePath = "./APNSAuthKey_AB90CD56XY.p8"
+let apnsPrivateKeyFilePath = "./APNsAuthKey_AB90CD56XY.p8"
 
 NotificationPusher.addConfigurationAPNS(
 	name: notificationsTestId, 
@@ -130,7 +130,7 @@ The topic is required when creating a NotificationPusher. Additional optional pa
 Public API
 ----
 
-The full public version 2.1.x API for notification pusher follows:
+The full public version 3.0 API for notification pusher follows:
 
 ```swift
 public class NotificationPusher {
