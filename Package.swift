@@ -7,7 +7,7 @@ let package = Package(
 	dependencies: [
 		.Package(url: "https://github.com/PerfectlySoft/Perfect-Thread.git", majorVersion: 3),
 		.Package(url: "https://github.com/PerfectlySoft/Perfect-Net.git", majorVersion: 3),
-		.Package(url: "https://github.com/PerfectlySoft/Perfect-HTTPServer.git", majorVersion: 3),
+		.Package(url: "https://github.com/PerfectlySoft/Perfect-HTTPServer.git", majorVersion: 3), /* for HTTP2Client */
 		.Package(url: "https://github.com/PerfectlySoft/Perfect-HTTP.git", majorVersion: 3),
 		.Package(url: "https://github.com/PerfectlySoft/Perfect-Crypto.git", majorVersion: 3),
 	]
