@@ -158,7 +158,6 @@ class NotificationConfiguration {
 
 class NotificationHTTP2Client: HTTP2Client {
 	let id: Int
-	
     init(id: Int) {
         self.id = id
         super.init()
@@ -174,7 +173,7 @@ public struct NotificationResponse: CustomStringConvertible {
 	/// The body data bytes interpreted as JSON and decoded into a Dictionary.
 	public var jsonObjectBody: [String:Any] {
 		do {
-			if let json = try self.stringBody.jsonDecode() as? [String:Any] {
+			if let json = try stringBody.jsonDecode() as? [String:Any] {
 				return json
 			}
 		}
@@ -185,7 +184,6 @@ public struct NotificationResponse: CustomStringConvertible {
 	public var stringBody: String {
 		return UTF8Encoding.encode(bytes: self.body)
 	}
-	
 	public var description: String {
 		return "\(status): \(stringBody)"
 	}
@@ -229,7 +227,7 @@ public class NotificationPusher {
 	}
 	
 	public static func addConfigurationAPNS(name: String, production: Bool, configurator: @escaping netConfigurator = { _ in }) {
-		self.configurationsLock.doWithLock {
+		configurationsLock.doWithLock {
 			self.iosConfigurations[name] = NotificationConfiguration(configurator: configurator, production: production)
 		}
 	}
@@ -237,14 +235,12 @@ public class NotificationPusher {
 	public static func addConfigurationAPNS(name: String, production: Bool, certificatePath: String) {
 		addConfigurationIOS(name: name) {
 			net in
-
 			guard File(certificatePath).exists else {
 				fatalError("File not found \(certificatePath)")
 			}
 			guard net.useCertificateFile(cert: certificatePath)
 				&& net.usePrivateKeyFile(cert: certificatePath)
-				&& net.checkPrivateKey()
-				  else {
+				&& net.checkPrivateKey() else {
 					let code = Int32(net.errorCode())
 					print("Error validating private key file: \(net.errorStr(forCode: code))")
 					return
@@ -254,7 +250,7 @@ public class NotificationPusher {
 	
 	static func getStreamAPNS(configurationName configuration: String, callback: @escaping (HTTP2Client?, NotificationConfiguration?) -> ()) {
 		var conf: NotificationConfiguration?
-		self.configurationsLock.doWithLock {
+		configurationsLock.doWithLock {
 			conf = self.iosConfigurations[configuration]
 		}
         guard let c = conf else {
@@ -272,33 +268,39 @@ public class NotificationPusher {
                 idCounter = idCounter &+ 1
             }
         }
-        guard needsConnect else {
-            callback(net, c)
-            return
-        }
-		
-		net?.net.initializedCallback = c.configurator
-        net?.connect(host: c.notificationHostAPNS, port: iosNotificationPort, ssl: true, timeoutSeconds: 5.0) {
-            b in
-            if b {
-                callback(net!, c)
-            } else {
-                callback(nil, nil)
-            }
-        }
+        if !needsConnect {
+			// this is an existing, idle stream
+			// send a ping to ensure it's valid
+			// if it's not valid then open a new stream
+			net?.sendPing {
+				ok in
+				guard ok else {
+					return self.getStreamAPNS(configurationName: configuration, callback: callback)
+				}
+				callback(net, c)
+			}
+		} else {
+			net?.net.initializedCallback = c.configurator
+			net?.connect(host: c.notificationHostAPNS, port: iosNotificationPort, ssl: true, timeoutSeconds: 5.0) {
+				b in
+				if b {
+					callback(net!, c)
+				} else {
+					callback(nil, nil)
+				}
+			}
+		}
 	}
 	
 	static func releaseStreamAPNS(configurationName configuration: String, net: HTTP2Client) {
 		var conf: NotificationConfiguration?
-		self.configurationsLock.doWithLock {
+		configurationsLock.doWithLock {
 			conf = self.iosConfigurations[configuration]
 		}
-		
         guard let c = conf, let n = net as? NotificationHTTP2Client  else {
             net.close()
             return
         }
-        
         c.lock.doWithLock {
             activeStreams.removeValue(forKey: n.id)
             if net.isConnected {
@@ -308,11 +310,10 @@ public class NotificationPusher {
 	}
 
 	func resetResponses() {
-		self.responses.removeAll()
+		responses.removeAll()
 	}
 	
 	func pushAPNS(_ net: HTTP2Client, config: NotificationConfiguration, deviceToken: String, notificationJson: [UInt8], callback: @escaping (NotificationResponse) -> ()) {
-		
 		let request = net.createRequest()
 		request.method = .post
 		request.postBodyBytes = notificationJson
@@ -320,21 +321,17 @@ public class NotificationPusher {
         request.setHeader(.custom(name: "apns-expiration"), value: "\(expiration.rawValue)")
         request.setHeader(.custom(name: "apns-priority"), value: "\(priority.rawValue)")
 		request.setHeader(.custom(name: "apns-topic"), value: apnsTopic)
-		if let cid = self.collapseId {
+		if let cid = collapseId {
 			request.setHeader(.custom(name: "apns-collapse-id"), value: cid)
 		}
-		
 		if config.usingJWT, let token = config.jwtToken {
 			request.setHeader(.authorization, value: "bearer \(token)")
 		}
-		
 		request.path = "/3/device/\(deviceToken)"
 		net.sendRequest(request) {
 			response, msg in
-			
             guard let r = response else {
-                callback(NotificationResponse(status: .internalServerError, body: UTF8Encoding.decode(string: msg ?? "No response")))
-                return
+                return callback(NotificationResponse(status: .internalServerError, body: UTF8Encoding.decode(string: msg ?? "No response")))
             }
             callback(NotificationResponse(status: r.status, body: r.bodyBytes))
 		}
@@ -343,8 +340,7 @@ public class NotificationPusher {
 	func pushAPNS(_ client: HTTP2Client, config: NotificationConfiguration, deviceTokens: ComponentGenerator, notificationJson: [UInt8], callback: @escaping ([NotificationResponse]) -> ()) {
 		var g = deviceTokens
         guard let next = g.next() else {
-            callback(self.responses)
-            return
+            return callback(responses)
         }
 		pushAPNS(client, config: config, deviceToken: next, notificationJson: notificationJson) {
             response in
@@ -354,10 +350,10 @@ public class NotificationPusher {
 	}
 	
 	func pushAPNS(_ client: HTTP2Client, config: NotificationConfiguration, deviceTokens: [String], notificationItems: [APNSNotificationItem], callback: @escaping ([NotificationResponse]) -> ()) {
-		self.resetResponses()
+		resetResponses()
 		let g = deviceTokens.makeIterator()
-		let jsond = UTF8Encoding.decode(string: self.itemsToPayloadString(notificationItems: notificationItems))
-		self.pushAPNS(client, config: config, deviceTokens: g, notificationJson: jsond, callback: callback)
+		let jsond = UTF8Encoding.decode(string: itemsToPayloadString(notificationItems: notificationItems))
+		pushAPNS(client, config: config, deviceTokens: g, notificationJson: jsond, callback: callback)
 	}
 	
 	func itemsToPayloadString(notificationItems items: [APNSNotificationItem]) -> String {
@@ -365,7 +361,6 @@ public class NotificationPusher {
 		var aps = [String:Any]()
 		var alert = [String:Any]()
 		var alertBody: String?
-		
 		for item in items {
 			switch item {
 			case .alertBody(let s):
@@ -402,7 +397,6 @@ public class NotificationPusher {
                 aps["mutable-content"] = 1
             }
 		}
-		
 		if let ab = alertBody {
 			if alert.count == 0 { // just a string alert
 				aps["alert"] = ab
@@ -411,12 +405,10 @@ public class NotificationPusher {
 				aps["alert"] = alert
 			}
 		}
-		
 		dict["aps"] = aps
 		do {
 			return try dict.jsonEncodedString()
-		}
-		catch {}
+		} catch {}
 		return "{}"
 	}
 	
@@ -433,7 +425,7 @@ public extension NotificationPusher {
 		guard File(privateKeyPath).exists else {
 			fatalError("The private key file \"\(privateKeyPath)\" does not exist. Current working directory: \(Dir.workingDir.path)")
 		}
-		self.configurationsLock.doWithLock {
+		configurationsLock.doWithLock {
 			self.iosConfigurations[name] = NotificationConfiguration(keyId: keyId, teamId: teamId, privateKeyPath: privateKeyPath, production: production)
 		}
 	}
@@ -463,17 +455,13 @@ public extension NotificationPusher {
 		NotificationPusher.getStreamAPNS(configurationName: configurationName) {
 			client, config in
 			guard let c = client, let config = config else {
-				callback([NotificationResponse(status: .internalServerError, body: [UInt8]())])
-				return
+				return callback([NotificationResponse(status: .internalServerError, body: [UInt8]())])
 			}
 			self.pushAPNS(c, config: config, deviceTokens: deviceTokens, notificationItems: notificationItems) {
 				responses in
-				
 				NotificationPusher.releaseStreamAPNS(configurationName: configurationName, net: c)
-				
 				guard responses.count == deviceTokens.count else {
-					callback([NotificationResponse(status: .internalServerError, body: [UInt8]())])
-					return
+					return callback([NotificationResponse(status: .internalServerError, body: [UInt8]())])
 				}
 				callback(responses)
 			}
@@ -498,9 +486,8 @@ public extension NotificationPusher {
 	public func pushIOS(configurationName: String, deviceTokens: [String], expiration: UInt32, priority: UInt8, notificationItems: [APNSNotificationItem], callback: @escaping ([NotificationResponse]) -> ()) {
 		self.expiration = APNSExpiration(rawValue: Int(expiration)) ?? .immediate
 		self.priority = APNSPriority(rawValue: Int(priority)) ?? .immediate
-		self.pushAPNS(configurationName: configurationName, deviceTokens: deviceTokens, notificationItems: notificationItems, callback: callback)
+		pushAPNS(configurationName: configurationName, deviceTokens: deviceTokens, notificationItems: notificationItems, callback: callback)
 	}
-	//
 }
 
 // !FIX! Downcasting to protocol does not work on Linux
