@@ -24,6 +24,7 @@ import PerfectHTTPServer
 import PerfectHTTP
 import PerfectCrypto
 import Foundation
+import Dispatch
 
 #if os(macOS)
 	import Darwin
