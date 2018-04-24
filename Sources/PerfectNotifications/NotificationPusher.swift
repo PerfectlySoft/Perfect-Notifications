@@ -98,7 +98,7 @@ private let iosNotificationDevelopmentHost = "api.development.push.apple.com"
 private let iosNotificationProductionHost = "api.push.apple.com"
 
 class NotificationConfiguration {
-	
+	let name: String
 	let configurator: NotificationPusher.netConfigurator
 	
 	let keyId: String?
@@ -139,7 +139,8 @@ class NotificationConfiguration {
 		return iosNotificationDevelopmentHost
 	}
 	
-	init(configurator: @escaping NotificationPusher.netConfigurator, production: Bool) {
+	init(name: String, configurator: @escaping NotificationPusher.netConfigurator, production: Bool) {
+		self.name = name
 		self.configurator = configurator
 		keyId = nil
 		teamId = nil
@@ -147,7 +148,8 @@ class NotificationConfiguration {
 		privateKeyPath = nil
 	}
 	
-	init(keyId: String, teamId: String, privateKeyPath: String, production: Bool) {
+	init(name: String, keyId: String, teamId: String, privateKeyPath: String, production: Bool) {
+		self.name = name
 		configurator = { _ in }
 		self.keyId = keyId
 		self.teamId = teamId
@@ -228,7 +230,7 @@ public class NotificationPusher {
 	
 	public static func addConfigurationAPNS(name: String, production: Bool, configurator: @escaping netConfigurator = { _ in }) {
 		configurationsLock.doWithLock {
-			self.iosConfigurations[name] = NotificationConfiguration(configurator: configurator, production: production)
+			self.iosConfigurations[name] = NotificationConfiguration(name: name, configurator: configurator, production: production)
 		}
 	}
 	
@@ -248,34 +250,35 @@ public class NotificationPusher {
 		}
 	}
 	
-	static func getStreamAPNS(configurationName configuration: String, callback: @escaping (HTTP2Client?, NotificationConfiguration?) -> ()) {
+	static func getConfiguration(name: String) -> NotificationConfiguration? {
 		var conf: NotificationConfiguration?
 		configurationsLock.doWithLock {
-			conf = self.iosConfigurations[configuration]
+			conf = self.iosConfigurations[name]
 		}
-        guard let c = conf else {
-            return callback(nil, nil)
-        }
-        var net: NotificationHTTP2Client?
-        var needsConnect = false
-        c.lock.doWithLock {
-            if c.streams.count > 0 {
-                net = c.streams.removeLast()
-            } else {
-                needsConnect = true
-                net = NotificationHTTP2Client(id: idCounter)
-                activeStreams[idCounter] = net
-                idCounter = idCounter &+ 1
-            }
-        }
-        if !needsConnect {
+		return conf
+	}
+	
+	static func getStreamAPNS(configuration c: NotificationConfiguration, callback: @escaping (HTTP2Client?, NotificationConfiguration?) -> ()) {
+		var net: NotificationHTTP2Client?
+		var needsConnect = false
+		c.lock.doWithLock {
+			if c.streams.count > 0 {
+				net = c.streams.removeLast()
+			} else {
+				needsConnect = true
+				net = NotificationHTTP2Client(id: idCounter)
+				activeStreams[idCounter] = net
+				idCounter = idCounter &+ 1
+			}
+		}
+		if !needsConnect {
 			// this is an existing, idle stream
 			// send a ping to ensure it's valid
 			// if it's not valid then open a new stream
 			net?.sendPing {
 				ok in
 				guard ok else {
-					return self.getStreamAPNS(configurationName: configuration, callback: callback)
+					return self.getStreamAPNS(configurationName: c.name, callback: callback)
 				}
 				callback(net, c)
 			}
@@ -290,6 +293,13 @@ public class NotificationPusher {
 				}
 			}
 		}
+	}
+	
+	static func getStreamAPNS(configurationName configuration: String, callback: @escaping (HTTP2Client?, NotificationConfiguration?) -> ()) {
+		guard let c = getConfiguration(name: configuration) else {
+            return callback(nil, nil)
+        }
+		getStreamAPNS(configuration: c, callback: callback)
 	}
 	
 	static func releaseStreamAPNS(configurationName configuration: String, net: HTTP2Client) {
@@ -337,16 +347,35 @@ public class NotificationPusher {
 		}
 	}
 	
+	func pushAPNS(_ client: HTTP2Client, config: NotificationConfiguration, deviceToken: String, remainingDeviceTokens: ComponentGenerator, notificationJson: [UInt8], callback: @escaping ([NotificationResponse]) -> ()) {
+		pushAPNS(client, config: config, deviceToken: deviceToken, notificationJson: notificationJson) {
+			response in
+			if case .internalServerError = response.status {
+				NotificationPusher.getStreamAPNS(configuration: config) {
+					client, config in
+					guard let client = client, let config = config else {
+						let msg = "Connection could not be established"
+						self.responses.append(NotificationResponse(status: .internalServerError, body: UTF8Encoding.decode(string: msg)))
+						self.responses.append(contentsOf: remainingDeviceTokens.map { _ -> NotificationResponse in NotificationResponse(status: .internalServerError, body: UTF8Encoding.decode(string: msg)) })
+						return callback(self.responses)
+					}
+					self.pushAPNS(client, config: config, deviceToken: deviceToken, remainingDeviceTokens: remainingDeviceTokens, notificationJson: notificationJson, callback: callback)
+				}
+			} else {
+				self.responses.append(response)
+				DispatchQueue.global().async {
+					self.pushAPNS(client, config: config, deviceTokens: remainingDeviceTokens, notificationJson: notificationJson, callback: callback)
+				}
+			}
+		}
+	}
+	
 	func pushAPNS(_ client: HTTP2Client, config: NotificationConfiguration, deviceTokens: ComponentGenerator, notificationJson: [UInt8], callback: @escaping ([NotificationResponse]) -> ()) {
 		var g = deviceTokens
         guard let next = g.next() else {
             return callback(responses)
         }
-		pushAPNS(client, config: config, deviceToken: next, notificationJson: notificationJson) {
-            response in
-            self.responses.append(response)
-			self.pushAPNS(client, config: config, deviceTokens: g, notificationJson: notificationJson, callback: callback)
-        }
+		pushAPNS(client, config: config, deviceToken: next, remainingDeviceTokens: g, notificationJson: notificationJson, callback: callback)
 	}
 	
 	func pushAPNS(_ client: HTTP2Client, config: NotificationConfiguration, deviceTokens: [String], notificationItems: [APNSNotificationItem], callback: @escaping ([NotificationResponse]) -> ()) {
@@ -426,7 +455,7 @@ public extension NotificationPusher {
 			fatalError("The private key file \"\(privateKeyPath)\" does not exist. Current working directory: \(Dir.workingDir.path)")
 		}
 		configurationsLock.doWithLock {
-			self.iosConfigurations[name] = NotificationConfiguration(keyId: keyId, teamId: teamId, privateKeyPath: privateKeyPath, production: production)
+			self.iosConfigurations[name] = NotificationConfiguration(name: name, keyId: keyId, teamId: teamId, privateKeyPath: privateKeyPath, production: production)
 		}
 	}
 }
