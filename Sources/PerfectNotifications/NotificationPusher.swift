@@ -345,7 +345,9 @@ public class NotificationPusher {
 		pushAPNS(client, config: config, deviceToken: next, notificationJson: notificationJson) {
             response in
             self.responses.append(response)
-			self.pushAPNS(client, config: config, deviceTokens: g, notificationJson: notificationJson, callback: callback)
+			DispatchQueue.global().async {
+				self.pushAPNS(client, config: config, deviceTokens: g, notificationJson: notificationJson, callback: callback)
+			}
         }
 	}
 	
