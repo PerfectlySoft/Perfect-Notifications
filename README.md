@@ -62,7 +62,7 @@ Obtain APNs Auth Key
 
 To connect your server to Apple's push notification system you will first need to obtain an "APNs Auth Key". This key is used on your server to configure its APNs access. You can generate this key through your Apple developer account portal. Log in to your developer account and choose "Certificates, IDs &amp; Profiles" from the menu. Then, under "Certificates", choose "APNs Auth Key".
 
-If you haven't already created and downloaded the auth key, click "+" to create a new one. Make sure you select **Apple Push Notification Authentication Key (Sandbox & Production)**. This one key can be used for both development or production and can be used for any of your iOS/macOS apps.
+If you haven't already created and downloaded the auth key, click "+" to create a new one. Make sure you select **Apple Push Notification service SSL (Sandbox & Production)**. This one key can be used for both development or production and can be used for any of your iOS/macOS apps.
 
 Click "Continue" and you will be given a chance to download the **private key**. You must download this key now and **save the file**. Also copy the "Key ID" shown in the same view. This will be a 10 character string.
 
