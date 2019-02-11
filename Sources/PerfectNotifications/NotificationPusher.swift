@@ -20,8 +20,6 @@
 import PerfectLib
 import PerfectNet
 import PerfectThread
-import PerfectHTTPServer
-import PerfectHTTP
 import PerfectCrypto
 import Foundation
 import Dispatch
