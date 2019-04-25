@@ -47,7 +47,7 @@ Building
 This is a Swift Package manager based project. Add this repository as a dependency in your Package.swift file.
 
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-.Package(url:"https://github.com/PerfectlySoft/Perfect-Notifications.git", majorVersion: 3)
+.package(url:"https://github.com/PerfectlySoft/Perfect-Notifications.git", from: "3.0.0")
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Overview
