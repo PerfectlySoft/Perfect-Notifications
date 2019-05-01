@@ -486,7 +486,7 @@ public class NotificationPusher {
 
 public extension NotificationPusher {
 	/// Add an APNS configuration which can be later used to push notifications.
-	public static func addConfigurationAPNS(name: String, production: Bool, keyId: String, teamId: String, privateKeyPath: String) {
+	static func addConfigurationAPNS(name: String, production: Bool, keyId: String, teamId: String, privateKeyPath: String) {
 		_ = PerfectCrypto.isInitialized
 		guard File(privateKeyPath).exists else {
 			fatalError("The private key file \"\(privateKeyPath)\" does not exist. Current working directory: \(Dir.workingDir.path)")
@@ -504,7 +504,7 @@ public extension NotificationPusher {
 	///		https://developer.apple.com/library/mac/documentation/NetworkingInternet/Conceptual/RemoteNotificationsPG/Chapters/APNsProviderAPI.html
 	/// Provide a list of APNSNotificationItems.
 	/// Provide a callback with which to receive the response.
-	public func pushAPNS(configurationName: String, deviceToken: String, notificationItems: [APNSNotificationItem], callback: @escaping (NotificationResponse) -> ()) {
+	func pushAPNS(configurationName: String, deviceToken: String, notificationItems: [APNSNotificationItem], callback: @escaping (NotificationResponse) -> ()) {
 		pushAPNS(configurationName: configurationName, deviceTokens: [deviceToken], notificationItems: notificationItems, callback: { lst in callback(lst.first!) })
 	}
 	
@@ -514,7 +514,7 @@ public extension NotificationPusher {
 	///		https://developer.apple.com/library/mac/documentation/NetworkingInternet/Conceptual/RemoteNotificationsPG/Chapters/APNsProviderAPI.html
 	/// Provide a list of APNSNotificationItems.
 	/// Provide a callback with which to receive the responses.
-	public func pushAPNS(configurationName: String, deviceTokens: [String],
+	func pushAPNS(configurationName: String, deviceTokens: [String],
 	                     notificationItems: [APNSNotificationItem],
 	                     callback: @escaping ([NotificationResponse]) -> ()) {
 		
@@ -537,19 +537,19 @@ public extension NotificationPusher {
 
 public extension NotificationPusher {
 	// TODO: deprecate
-	public static func addConfigurationIOS(name: String, configurator: @escaping netConfigurator = { _ in }) {
+	static func addConfigurationIOS(name: String, configurator: @escaping netConfigurator = { _ in }) {
 		addConfigurationAPNS(name: name, production: NotificationPusher.development, configurator: configurator)
 	}
-	public static func addConfigurationIOS(name: String, certificatePath: String) {
+	static func addConfigurationIOS(name: String, certificatePath: String) {
 		addConfigurationAPNS(name: name, production: NotificationPusher.development, certificatePath: certificatePath)
 	}
-	public static func addConfigurationIOS(name: String, keyId: String, teamId: String, privateKeyPath: String) {
+	static func addConfigurationIOS(name: String, keyId: String, teamId: String, privateKeyPath: String) {
 		addConfigurationAPNS(name: name, production: NotificationPusher.development, keyId: keyId, teamId: teamId, privateKeyPath: privateKeyPath)
 	}
-	public func pushIOS(configurationName: String, deviceToken: String, expiration: UInt32, priority: UInt8, notificationItems: [APNSNotificationItem], callback: @escaping (NotificationResponse) -> ()) {
+	func pushIOS(configurationName: String, deviceToken: String, expiration: UInt32, priority: UInt8, notificationItems: [APNSNotificationItem], callback: @escaping (NotificationResponse) -> ()) {
 		pushIOS(configurationName: configurationName, deviceTokens: [deviceToken], expiration: expiration, priority: priority, notificationItems: notificationItems, callback: { lst in callback(lst.first!) })
 	}
-	public func pushIOS(configurationName: String, deviceTokens: [String], expiration: UInt32, priority: UInt8, notificationItems: [APNSNotificationItem], callback: @escaping ([NotificationResponse]) -> ()) {
+	func pushIOS(configurationName: String, deviceTokens: [String], expiration: UInt32, priority: UInt8, notificationItems: [APNSNotificationItem], callback: @escaping ([NotificationResponse]) -> ()) {
 		self.expiration = APNSExpiration(rawValue: Int(expiration)) ?? .immediate
 		self.priority = APNSPriority(rawValue: Int(priority)) ?? .immediate
 		pushAPNS(configurationName: configurationName, deviceTokens: deviceTokens, notificationItems: notificationItems, callback: callback)
