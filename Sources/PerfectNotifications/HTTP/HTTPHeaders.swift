@@ -33,9 +33,9 @@ enum HTTPRequestHeader {
 		case xB3TraceId, xB3SpanId, xB3ParentSpanId
 		case custom(name: String)
 		
-		var hashValue: Int {
-			return self.standardName.lowercased().hashValue
-		}
+        func hash(into hasher: inout Hasher) {
+            hasher.combine(standardName.lowercased())
+        }
 		
 		var standardName: String {
 			switch self {

@@ -59,10 +59,10 @@ enum HTTPMethod: Hashable, CustomStringConvertible {
 		}
 	}
 	
-	/// Method String hash value
-	var hashValue: Int {
-		return self.description.hashValue
-	}
+    
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(description)
+    }
 	
 	/// The method as a String
 	var description: String {
