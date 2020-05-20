@@ -58,8 +58,7 @@ enum HTTPMethod: Hashable, CustomStringConvertible {
 		default:        return .custom(string)
 		}
 	}
-	
-    
+	    
     func hash(into hasher: inout Hasher) {
         hasher.combine(description)
     }
