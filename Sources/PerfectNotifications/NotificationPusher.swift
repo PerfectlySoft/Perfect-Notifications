@@ -66,6 +66,71 @@ public enum APNSPriority: Int {
 	case background = 5
 }
 
+/**
+ The setting for the `apns-push-type` header.
+ 
+ The value of this header must accurately reflect the contents of your notification’s payload. If there is a mismatch, or if the header is missing on required systems, APNs may return an error, delay the delivery of the notification, or drop it altogether.
+ 
+ For more information, see [Sending Notification Requests to APNs](https://developer.apple.com/documentation/usernotifications/setting_up_a_remote_notification_server/sending_notification_requests_to_apns).
+ 
+ Required for watchOS 6 and later; recommended for macOS, iOS, tvOS, and iPadOS.
+ */
+public enum APNSPushType: String {
+    /**
+     Use the `alert` push type for notifications that trigger a user interaction—for example, an alert, badge, or sound.
+     
+     If you set this push type, the `apns-topic` header field must use your app’s bundle ID as the topic. For more information, see [Generating a Remote Notification](https://developer.apple.com/documentation/usernotifications/setting_up_a_remote_notification_server/generating_a_remote_notification).
+     
+     The `alert` push type is required on watchOS 6 and later. It is recommended on macOS, iOS, tvOS, and iPadOS.
+     */
+    case alert = "alert"
+    
+    /**
+     Use the `background` push type for notifications that deliver content in the background, and don’t trigger any user interactions.
+     
+     If you set this push type, the `apns-topic` header field must use your app’s bundle ID as the topic. For more information, see [Pushing Background Updates to Your App](https://developer.apple.com/documentation/usernotifications/setting_up_a_remote_notification_server/pushing_background_updates_to_your_app).
+     
+     The `background` push type is required on watchOS 6 and later. It is recommended on macOS, iOS, tvOS, and iPadOS.
+     */
+    case background = "background"
+    
+    /**
+     Use the `voip` push type for notifications that provide information about an incoming Voice-over-IP (VoIP) call.
+     
+     If you set this push type, the `apns-topic` header field must use your app’s bundle ID with `.voip` appended to the end. If you’re using certificate-based authentication, you must also register the certificate for VoIP services. The topic is then part of the 1.2.840.113635.100.6.3.4 or 1.2.840.113635.100.6.3.6 extension. For more information, see [Responding to VoIP Notifications from PushKit](https://developer.apple.com/documentation/pushkit/responding_to_voip_notifications_from_pushkit).
+     
+     The `voip` push type is not available on watchOS. It is recommended on macOS, iOS, tvOS, and iPadOS.
+     */
+    case voip = "voip"
+    
+    /**
+     Use the `complication` push type for notifications that contain update information for a watchOS app’s complications.
+     
+     If you set this push type, the `apns-topic` header field must use your app’s bundle ID with `.complication` appended to the end. If you’re using certificate-based authentication, you must also register the certificate for WatchKit services. The topic is then part of the 1.2.840.113635.100.6.3.6 extension. For more information, see [Updating Your Timeline](https://developer.apple.com/documentation/clockkit/adding_a_complication_to_your_watchos_app/providing_data_for_your_complication/updating_your_timeline).
+     
+     The `complication` push type is recommended for watchOS and iOS. It is not available on macOS, tvOS, and iPadOS.
+     */
+    case complication = "complication"
+    
+    /**
+     Use the `fileprovider` push type to signal changes to a File Provider extension.
+     
+     If you set this push type, the `apns-topic` header field must use your app’s bundle ID with `.pushkit.fileprovider` appended to the end. For more information, see [Using Push Notifications to Signal Changes](https://developer.apple.com/documentation/fileprovider/content_and_change_tracking/tracking_your_file_provider_s_changes/using_push_notifications_to_signal_changes).
+     
+     The `fileprovider` push type is not available on watchOS. It is recommended on macOS, iOS, tvOS, and iPadOS.
+     */
+    case fileProvider = "fileprovider"
+    
+    /**
+     Use the `mdm` push type for notifications that tell managed devices to contact the MDM server.
+     
+     If you set this push type, you must use the topic from the UID attribute in the subject of your MDM push certificate. For more information, see [Device Management](https://developer.apple.com/documentation/devicemanagement).
+     
+     The `mdm` push type is not available on watchOS. It is recommended on macOS, iOS, tvOS, and iPadOS.
+     */
+    case mdm = "mdm"
+}
+
 /// Time in the future when the notification, if has not be able to be delivered, will expire.
 public enum APNSExpiration {
 	/// Discard the notification if it can't be immediately delivered.
@@ -223,6 +288,8 @@ public class NotificationPusher {
 	public var expiration: APNSExpiration
 	public var priority: APNSPriority
 	public var collapseId: String?
+    /// Sets the apns-push-type for the notification
+    public var pushType: APNSPushType?
 	
 	var responses = [NotificationResponse]()
 	
@@ -236,11 +303,13 @@ public class NotificationPusher {
 	public init(apnsTopic: String,
 	            expiration: APNSExpiration = .immediate,
 	            priority: APNSPriority = .immediate,
-	            collapseId: String? = nil) {
+	            collapseId: String? = nil,
+	            pushType: APNSPushType? = nil) {
 		self.apnsTopic = apnsTopic
 		self.expiration = expiration
 		self.priority = priority
 		self.collapseId = collapseId
+		self.pushType = pushType
 	}
 	// This can be useful for internal testing of this package's functionality
 	// against any HTTP/2 server without needing a valid key/topic/device, etc.
@@ -359,6 +428,10 @@ public class NotificationPusher {
 		if let cid = collapseId {
 			request.setHeader(.custom(name: "apns-collapse-id"), value: cid)
 		}
+		if let pt = pushType {
+			request.setHeader(.custom(name: "apns-push-type"), value: pt.rawValue)
+		}
+		
 		if config.usingJWT, let token = config.jwtToken {
 			request.setHeader(.authorization, value: "bearer \(token)")
 		}
