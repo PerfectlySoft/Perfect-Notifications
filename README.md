@@ -1,32 +1,33 @@
-# Perfect-Notifications [简体中文](README.zh_CN.md)
+# Perfect-Notifications
 
 <p align="center">
-    <a href="http://perfect.org/get-involved.html" target="_blank">
-        <img src="http://perfect.org/assets/github/perfect_github_2_0_0.jpg" alt="Get Involed with Perfect!" width="854" />
-    </a>
-</p>
-
-<p align="center">
-    <a href="https://developer.apple.com/swift/" target="_blank">
-        <img src="https://img.shields.io/badge/Swift-5.2-orange.svg?style=flat" alt="Swift 5.2">
-    </a>
-    <a href="https://developer.apple.com/swift/" target="_blank">
-        <img src="https://img.shields.io/badge/Platforms-macOS%20%7C%20Linux%20-lightgray.svg?style=flat" alt="Platforms OS X | Linux">
-    </a>
-    <a href="http://perfect.org/licensing.html" target="_blank">
-        <img src="https://img.shields.io/badge/License-Apache-lightgrey.svg?style=flat" alt="License Apache">
-    </a>
+    <img src="https://img.shields.io/badge/Swift-6.2-orange.svg?style=flat" alt="Swift 6.2">
+    <img src="https://img.shields.io/badge/Platforms-macOS%2012%2B-lightgray.svg?style=flat" alt="Platforms macOS 12+">
+    <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache-lightgrey.svg?style=flat" alt="License Apache"></a>
 </p>
 
 APNs remote Notifications for Perfect. This package adds push notification support to your server. Send notifications to iOS/macOS devices.
 
+**A from-scratch Swift 6 rewrite** of the original package. The public API (`APNSClient`) is a
+completely different, modern async/await surface — it does not use the original
+`NotificationPusher` class. No dependency on NIO, PerfectHTTP, or any other package here —
+networking runs over Foundation's `URLSession` async API, with
+[apple/swift-crypto](https://github.com/apple/swift-crypto) as the only external dependency, used
+to sign ES256 APNs provider JWTs.
+
+The pre-Swift-6 version of this package is preserved on the [`legacy`](../../tree/legacy) branch.
+
 Building
 --------
 
-This is a Swift Package manager based project. Add this repository as a dependency in your Package.swift file.
+This is a Swift Package Manager based project targeting **Swift 6.2** (strict concurrency /
+`.swiftLanguageMode(.v6)`), macOS 12+. No other platform is currently declared in `Package.swift`
+(Linux support has not been verified).
+
+Add this repository as a dependency in your `Package.swift` file:
 
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-.package(url:"https://github.com/PerfectlySoft/Perfect-Notifications.git", from: "5.0.0")
+.package(url: "https://github.com/PerfectlySoft/Perfect-Notifications.git", branch: "main")
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Overview
@@ -35,6 +36,8 @@ Overview
 This system runs on the server side. Typically at app launch, an Apple device will register with Apple's system for remote notifications. Doing so will return to the device an ID which can be used by external systems to address the device and send notifications through APNs.
 
 When the device obtains its ID it will need to transmit it to **your** server. Your server will store this id and use it when sending notifications to one or more devices through APNs.
+
+The client itself, `APNSClient`, is a `Sendable` struct with `async throws` send methods — there is no callback-based API and no separate "configuration registry" step; you construct one client per set of APNs credentials and call `send`/`sendAlert`/`sendBackground` directly.
 
 Obtain APNs Auth Key
 --------
@@ -50,164 +53,200 @@ Finally you will need to locate your developer team id. Click "Account" near the
 Server Configuration
 ------
 
-To send notifications from your server your must have three pieces of information:
+To send notifications from your server your must have four pieces of information:
 
-1. The private key file which was downloaded
+1. The private key (`.p8`) file which was downloaded, or its PEM contents
 2. The 10 character key id
 3. Your 10 character team id
-4. An iOS/macOS app id
+4. An iOS/macOS app id ("topic")
 
-These four pieces of information are used to perform push notifications. This information must reside on your server. You can store this information in any manner provided it can be used by the server. For simplicity, the rest of this example assumes that the private key file is in the server's working directory and that the two keys and the app id are embedded in the Swift code.
-
-In your server Swift code, you must `import PerfectNotifications`. Then, before you start any HTTP servers or send any notifications you must add a "configuration" for the notifications you will be sending. This very simply ties your APNs keys to a name which you can then use later when pushing notifications.
+Unlike the original Perfect-era API, there is no separate "add a named configuration, then look it up later" step — you construct an `APNSClient` directly with the key material, and it internally mints and caches (auto-rotating every 55 minutes, before Apple's 60-minute expiry) the ES256 JWT provider token via `APNSCredentials` and swift-crypto.
 
 ```swift
 import PerfectNotifications
 
-// your app id. we use this as the configuration name, but they do not have to match
-let notificationsAppId = "my.app.id"
-
-let apnsKeyIdentifier = "AB90CD56XY"
+let apnsKeyIdentifier  = "AB90CD56XY"
 let apnsTeamIdentifier = "YX65DC09BA"
 let apnsPrivateKeyFilePath = "./APNsAuthKey_AB90CD56XY.p8"
+let topic = "my.app.id"
 
-NotificationPusher.addConfigurationAPNS(
-	name: notificationsTestId, 
-	production: false, // should be false when running pre-release app in debugger
-	keyId: apnsKeyIdentifier, 
-	teamId: apnsTeamIdentifier, 
-	privateKeyPath: apnsPrivateKeyFilePath)
-```
+let client = try APNSClient(
+    keyID: apnsKeyIdentifier,
+    teamID: apnsTeamIdentifier,
+    privateKeyPath: apnsPrivateKeyFilePath,
+    environment: .sandbox // .production for release builds
+)
 
-After the configuration has been added, notifications can be sent at any point. To do so, create a `NotificationPusher` with your app id, or "topic", then trigger a notification to one or more devices by calling its `pushAPNS` function:
+let notification = try APNSNotification(items: [
+    .alertTitle("Hello!"),
+    .sound("default")
+])
 
-```swift
-let deviceIds: [String] = [...]
-let n = NotificationPusher(apnsTopic: notificationsTestId)
-n.pushAPNS(
-	configurationName: notificationsTestId, 
-	deviceTokens: deviceIds, 
-	notificationItems: [.alertBody("Hello!"), .sound("default")]) {
-		responses in
-		print("\(responses)")
-		...
+let response = try await client.send(notification, to: deviceToken, topic: topic)
+if response.isSuccess {
+    print("sent — apns-id: \(response.apnsID ?? "?")")
+} else if let err = response.error {
+    print("rejected: \(err.reason)")
 }
 ```
 
-The topic is required when creating a NotificationPusher. Additional optional parameters can be provided to customize the notification's expiration, priority and collapse-id. Consult Apple's APNS documentation for the semantics of these options.
+`APNSCredentials` can also be supplied a PEM string directly (`APNSClient(keyID:teamID:pemString:environment:)`) instead of a file path — useful when the key is loaded from an environment variable or secrets store.
 
 Public API
 ----
 
-The full public version 3.0 API for notification pusher follows:
+The full public API surface follows:
 
 ```swift
-public class NotificationPusher {
-	
-	/// Add an APNS configuration which can be later used to push notifications.
-	public static func addConfigurationAPNS(
-		name: String, 
-		production: Bool, 
-		keyId: String, 
-		teamId: String, 
-		privateKeyPath: String)
+public struct APNSClient: Sendable {
+    public enum Environment: Sendable { case sandbox, production }
 
-	/// Initialize given an apns-topic string.
-	public init(
-		apnsTopic: String,
-		expiration: APNSExpiration = .immediate,
-		priority: APNSPriority = .immediate,
-		collapseId: String? = nil)
-		
-	/// Push one message to one device.
-	/// Provide the previously set configuration name, device token.
-	/// Provide a list of APNSNotificationItems.
-	/// Provide a callback with which to receive the response.
-	public func pushAPNS(
-		configurationName: String, 
-		deviceToken: String, 
-		notificationItems: [APNSNotificationItem], 
-		callback: @escaping (NotificationResponse) -> ())
-	
-	/// Push one message to multiple devices.
-	/// Provide the previously set configuration name, and zero or more device tokens. The same message will be sent to each device.
-	/// Provide a list of APNSNotificationItems.
-	/// Provide a callback with which to receive the responses.
-	public func pushAPNS(
-		configurationName: String, deviceTokens: [String],
-		notificationItems: [APNSNotificationItem],
-		callback: @escaping ([NotificationResponse]) -> ())
+    /// Load the signing key from a `.p8` file on disk.
+    public init(keyID: String, teamID: String, privateKeyPath: String,
+                environment: Environment = .sandbox,
+                urlSession: URLSession = .shared) throws
+
+    /// Supply the `.p8` key as a PEM string.
+    public init(keyID: String, teamID: String, pemString: String,
+                environment: Environment = .sandbox,
+                urlSession: URLSession = .shared) throws
+
+    /// Send a notification to a single device token.
+    public func send(
+        _ notification: APNSNotification,
+        to deviceToken: String,
+        topic: String,
+        pushType: APNSPushType = .alert,
+        priority: Int? = nil,
+        expiration: APNSExpiration? = nil,
+        collapseID: String? = nil
+    ) async throws -> APNSResponse
+
+    /// Send the same notification to multiple device tokens (sequential).
+    public func send(
+        _ notification: APNSNotification,
+        to deviceTokens: [String],
+        topic: String,
+        pushType: APNSPushType = .alert,
+        priority: Int? = nil,
+        expiration: APNSExpiration? = nil,
+        collapseID: String? = nil
+    ) async throws -> [APNSResponse]
+
+    /// Build and send a simple alert in one call.
+    @discardableResult
+    public func sendAlert(
+        to deviceToken: String,
+        topic: String,
+        title: String,
+        body: String? = nil,
+        subtitle: String? = nil,
+        badge: Int? = nil,
+        sound: String? = nil,
+        category: String? = nil,
+        threadId: String? = nil,
+        interruptionLevel: APNSNotificationItem.InterruptionLevel? = nil,
+        collapseID: String? = nil,
+        mutableContent: Bool = false
+    ) async throws -> APNSResponse
+
+    /// Send a silent background push (`content-available: 1`, priority 5).
+    @discardableResult
+    public func sendBackground(
+        to deviceToken: String,
+        topic: String,
+        customData: [APNSNotificationItem] = []
+    ) async throws -> APNSResponse
 }
 ```
 
-The remaining structures, including APNSNotificationItem follow:
+The remaining structures, including `APNSNotificationItem`, follow:
 
 ```swift
-/// Items to configure an individual notification push.
-public enum APNSNotificationItem {
-    /// alert body child property
-	case alertBody(String)
-    /// alert title child property
-	case alertTitle(String)
-    /// alert title-loc-key
-	case alertTitleLoc(String, [String]?)
-    /// alert action-loc-key
-	case alertActionLoc(String)
-    /// alert loc-key
-	case alertLoc(String, [String]?)
-    /// alert launch-image
-	case alertLaunchImage(String)
-    /// aps badge key
-	case badge(Int)
-    /// aps sound key
-	case sound(String)
-    /// aps content-available key
-	case contentAvailable
-	/// aps category key
-	case category(String)
-	/// aps thread-id key
-	case threadId(String)
-    /// custom payload data
-	case customPayload(String, Any)
-    /// apn mutable-content key
-	case mutableContent
+/// Items that compose the `aps` dictionary and top-level custom keys of a push payload.
+/// `@unchecked Sendable` because `.customPayload` accepts `Any` for JSON flexibility.
+public enum APNSNotificationItem: @unchecked Sendable {
+    case alertBody(String)
+    case alertTitle(String)
+    case alertSubtitle(String)
+    case alertTitleLoc(String, [String]?)
+    case alertActionLoc(String)
+    case alertLoc(String, [String]?)
+    case alertLaunchImage(String)
+    case badge(Int)
+    case sound(String)
+    case contentAvailable
+    case mutableContent
+    case category(String)
+    case threadId(String)
+    case targetContentId(String)
+    case interruptionLevel(InterruptionLevel)
+    case relevanceScore(Double)
+    case customPayload(String, Any)
+
+    public enum InterruptionLevel: String, Sendable {
+        case passive, active
+        case timeSensitive = "time-sensitive"
+        case critical
+    }
 }
 
-public enum APNSPriority: Int {
-	case immediate = 10
-	case background = 5
+/// A push notification payload ready to send.
+public struct APNSNotification: Sendable {
+    public init(items: [APNSNotificationItem]) throws
+    /// Supply a raw pre-encoded JSON payload.
+    public init(raw: Data)
+    /// Encode an `Encodable` value as the entire payload (must include the `aps` key).
+    public init<T: Encodable & Sendable>(encodable: T) throws
 }
 
-/// Time in the future when the notification, if has not be able to be delivered, will expire.
-public enum APNSExpiration {
-	/// Discard the notification if it can't be immediately delivered.
-	case immediate
-	/// now + seconds
-	case relative(Int)
-	/// absolute UTC time since epoch
-	case absolute(Int)
+/// The type of push notification being sent (required by APNs since iOS 13).
+public enum APNSPushType: String, Sendable, CaseIterable {
+    case alert, background, voip, complication
+    case fileProvider = "fileprovider"
+    case mdm, location
+    case liveActivity = "liveactivity"
+    case pushToTalk    = "pushtotalk"
+
+    /// Background must use priority 5; all others default to 10.
+    public var defaultPriority: Int
 }
 
-/// The response object given after a push attempt.
-public struct NotificationResponse: CustomStringConvertible {
-	/// The response code for the request.
-	public let status: HTTPResponseStatus
-	/// The response body data bytes.
-	public let body: [UInt8]
-	/// The body data bytes interpreted as JSON and decoded into a Dictionary.
-	public var jsonObjectBody: [String:Any]
-	/// The body data bytes converted to String.
-	public var stringBody: String
-	public var description: String
+public enum APNSPriority: Int, Sendable {
+    case immediate  = 10
+    case background = 5
+}
+
+/// When to discard an undeliverable notification.
+public enum APNSExpiration: Sendable {
+    case immediate
+    case relative(Int)
+    case absolute(Int)
+}
+
+/// The outcome of a single APNs send request.
+public struct APNSResponse: Sendable {
+    public let statusCode: Int
+    public let apnsID: String?
+    public let error: APNSResponseError?
+    public var isSuccess: Bool { statusCode == 200 }
+}
+
+/// An error reason returned by the APNs gateway (e.g. BadDeviceToken, Unregistered, ExpiredProviderToken).
+public struct APNSResponseError: Sendable, Equatable, CustomStringConvertible {
+    public let reason: String
+    public let timestamp: Int?
 }
 ```
 
 Additional Notes
 ----
 
-APNs requests are made from your server to Apple's servers "api.development.push.apple.com" or "api.push.apple.com" on port 443. One request will be used when sending one notification to one or more devices. Each connection will remain open and will be reused when sending subsequent notifications. If a connection "goes away" or there are no idle connections that can be used then a new connection will be opened. This is in accordance with Apple's recommended usage of APNs and should provide the best throughput when dealing with many concurrent notification requests.
+APNs requests are made from your server to Apple's servers `api.sandbox.push.apple.com` (development) or `api.push.apple.com` (production) on port 443, via `URLSession`'s async `data(for:)`. `URLSession` handles HTTP/2 connection reuse internally, in accordance with Apple's recommended usage of APNs.
 
-Consult [Perfect-NotificationsExample](https://github.com/PerfectExamples/Perfect-NotificationsExample) for a client/server combination which can be easily configured with your own information to quickly get APNS notifications for your apps.
+The package targets **Swift 6.2 with strict concurrency** enabled (`.swiftLanguageMode(.v6)` on both the library and test targets). `APNSClient`, `APNSNotification`, `APNSPushType`, `APNSResponse`, and `APNSResponseError` are plain `Sendable`; `APNSCredentials` and `APNSNotificationItem` are `@unchecked Sendable` (an `NSLock`-guarded JWT cache and an `Any`-typed payload case, respectively). No actors are used — `APNSCredentials` synchronizes its cached-token state with `NSLock`.
+
+The `Perfect-NotificationsExample` project linked from the original PerfectlySoft repo targets the legacy callback-based `NotificationPusher` API and is **not** compatible with this fork's `APNSClient`; treat it as historical reference only, not a working example for this package.
 
 ## Further Information
 For more information on the Perfect project, please visit [perfect.org](http://perfect.org).

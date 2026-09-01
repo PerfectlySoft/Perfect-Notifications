@@ -1,19 +1,30 @@
-// swift-tools-version:5.1
+// swift-tools-version: 6.2
 import PackageDescription
 
 let package = Package(
-	name: "PerfectNotifications",
-	platforms: [
-		.macOS(.v10_15)
-	],
-	products: [
-		.library(name: "PerfectNotifications", targets: ["PerfectNotifications"])
-	],
-	dependencies: [
-		.package(url: "https://github.com/PerfectlySoft/Perfect-Net.git", from: "4.0.0"),
-		.package(url: "https://github.com/PerfectlySoft/Perfect-Thread.git", from: "3.0.0")
-	],
-	targets: [
-		.target(name: "PerfectNotifications", dependencies: ["PerfectNet", "PerfectThread"])
-	]
+    name: "PerfectNotifications",
+    platforms: [.macOS(.v12)],
+    products: [
+        .library(name: "PerfectNotifications", targets: ["PerfectNotifications"])
+    ],
+    dependencies: [
+        .package(url: "https://github.com/apple/swift-crypto.git", from: "3.0.0")
+    ],
+    targets: [
+        .target(
+            name: "PerfectNotifications",
+            dependencies: [
+                .product(name: "Crypto", package: "swift-crypto")
+            ],
+            swiftSettings: [.swiftLanguageMode(.v6)]
+        ),
+        .testTarget(
+            name: "PerfectNotificationsTests",
+            dependencies: [
+                "PerfectNotifications",
+                .product(name: "Crypto", package: "swift-crypto")
+            ],
+            swiftSettings: [.swiftLanguageMode(.v6)]
+        )
+    ]
 )
