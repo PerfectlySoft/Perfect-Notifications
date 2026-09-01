@@ -1,45 +1,34 @@
-# Perfect-Notifications [简体中文](README.zh_CN.md)
+# Perfect-Notifications
 
 <p align="center">
-    <a href="http://perfect.org/get-involved.html" target="_blank">
-        <img src="http://perfect.org/assets/github/perfect_github_2_0_0.jpg" alt="Get Involed with Perfect!" width="854" />
-    </a>
-</p>
-
-<p align="center">
-    <a href="https://developer.apple.com/swift/" target="_blank">
-        <img src="https://img.shields.io/badge/Swift-6.0-orange.svg?style=flat" alt="Swift 6.0">
-    </a>
-    <a href="https://developer.apple.com/swift/" target="_blank">
-        <img src="https://img.shields.io/badge/Platforms-macOS%2013%2B-lightgray.svg?style=flat" alt="Platforms macOS 13+">
-    </a>
-    <a href="LICENSE" target="_blank">
-        <img src="https://img.shields.io/badge/License-Apache-lightgrey.svg?style=flat" alt="License Apache">
-    </a>
+    <img src="https://img.shields.io/badge/Swift-6.2-orange.svg?style=flat" alt="Swift 6.2">
+    <img src="https://img.shields.io/badge/Platforms-macOS%2012%2B-lightgray.svg?style=flat" alt="Platforms macOS 12+">
+    <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache-lightgrey.svg?style=flat" alt="License Apache"></a>
 </p>
 
 APNs remote Notifications for Perfect. This package adds push notification support to your server. Send notifications to iOS/macOS devices.
 
-> **This is Tim Taplin's [Perfect-Resurrection](https://github.com/taplin) fork**, a from-scratch Swift 6 rewrite of the original PerfectlySoft package. The public API below (`APNSClient`) is a completely different, modern async/await surface — it does not use the original `NotificationPusher` class. This package currently has **zero consumers** in the Perfect-Resurrection ecosystem (no other package here depends on it yet); it is staged, working infrastructure awaiting integration into a consumer such as Perfect-Lasso, not dead or deprecated code.
+**A from-scratch Swift 6 rewrite** of the original package. The public API (`APNSClient`) is a
+completely different, modern async/await surface — it does not use the original
+`NotificationPusher` class. No dependency on NIO, PerfectHTTP, or any other package here —
+networking runs over Foundation's `URLSession` async API, with
+[apple/swift-crypto](https://github.com/apple/swift-crypto) as the only external dependency, used
+to sign ES256 APNs provider JWTs.
+
+The pre-Swift-6 version of this package is preserved on the [`legacy`](../../tree/legacy) branch.
 
 Building
 --------
 
-This is a Swift Package Manager based project targeting **Swift 6.0** (swift-tools-version 6.0, strict concurrency / `.swiftLanguageMode(.v6)`). It requires **macOS 13+**; no other platform is currently declared in `Package.swift` (Linux support has not been verified).
+This is a Swift Package Manager based project targeting **Swift 6.2** (strict concurrency /
+`.swiftLanguageMode(.v6)`), macOS 12+. No other platform is currently declared in `Package.swift`
+(Linux support has not been verified).
 
 Add this repository as a dependency in your `Package.swift` file:
 
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-.package(url: "https://github.com/taplin/Perfect-Notifications.git", branch: "main")
+.package(url: "https://github.com/PerfectlySoft/Perfect-Notifications.git", branch: "main")
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-or, from elsewhere in the Perfect-Resurrection workspace, as a local path dependency:
-
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-.package(path: "../Perfect-Notifications")
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-The package's only external dependency is [apple/swift-crypto](https://github.com/apple/swift-crypto) (from 3.0.0), used to sign ES256 APNs provider JWTs. There is no dependency on NIO, PerfectHTTP, or any other Perfect-Resurrection package — networking runs over Foundation's `URLSession` async API.
 
 Overview
 --------
@@ -255,7 +244,7 @@ Additional Notes
 
 APNs requests are made from your server to Apple's servers `api.sandbox.push.apple.com` (development) or `api.push.apple.com` (production) on port 443, via `URLSession`'s async `data(for:)`. `URLSession` handles HTTP/2 connection reuse internally, in accordance with Apple's recommended usage of APNs.
 
-The package targets **Swift 6.0 with strict concurrency** enabled (`.swiftLanguageMode(.v6)` on both the library and test targets). `APNSClient`, `APNSNotification`, `APNSPushType`, `APNSResponse`, and `APNSResponseError` are plain `Sendable`; `APNSCredentials` and `APNSNotificationItem` are `@unchecked Sendable` (an `NSLock`-guarded JWT cache and an `Any`-typed payload case, respectively). No actors are used — `APNSCredentials` synchronizes its cached-token state with `NSLock`.
+The package targets **Swift 6.2 with strict concurrency** enabled (`.swiftLanguageMode(.v6)` on both the library and test targets). `APNSClient`, `APNSNotification`, `APNSPushType`, `APNSResponse`, and `APNSResponseError` are plain `Sendable`; `APNSCredentials` and `APNSNotificationItem` are `@unchecked Sendable` (an `NSLock`-guarded JWT cache and an `Any`-typed payload case, respectively). No actors are used — `APNSCredentials` synchronizes its cached-token state with `NSLock`.
 
 The `Perfect-NotificationsExample` project linked from the original PerfectlySoft repo targets the legacy callback-based `NotificationPusher` API and is **not** compatible with this fork's `APNSClient`; treat it as historical reference only, not a working example for this package.
 
