@@ -1,74 +1,118 @@
 import Crypto
 import Foundation
 
-/// Holds an APNs `.p8` private key, mints JWT provider tokens, and rotates them
-/// automatically before the 60-minute APNs expiry.
+/// Holds an APNs `.p8` private key and mints JWT provider tokens.
+///
+/// Apple accepts a provider token for up to 60 minutes, and refuses updates more often
+/// than once every 20 minutes (`TooManyProviderTokenUpdates`). So a token is reused for
+/// 50 minutes, is replaced early only after APNs rejected it, and is never replaced
+/// within 20 minutes of being minted.
 final class APNSCredentials: @unchecked Sendable {
-    private let keyID: String
-    private let teamID: String
+    /// Proactive refresh age, safely inside Apple's 60-minute limit.
+    static let refreshAge: TimeInterval = 50 * 60
+    /// Apple's minimum interval between token updates.
+    static let minimumRefreshInterval: TimeInterval = 20 * 60
+
+    let keyID: String
+    let teamID: String
     private let privateKey: P256.Signing.PrivateKey
+    private let now: @Sendable () -> Date
 
     private let lock = NSLock()
     private var cachedToken: String?
-    private var tokenIssuedAt: Date = .distantPast
+    private var issuedAt: Date = .distantPast
+    private var rejected = false
 
     // MARK: Init
 
-    init(keyID: String, teamID: String, privateKeyPath: String) throws {
-        self.keyID = keyID
-        self.teamID = teamID
+    convenience init(keyID: String, teamID: String, privateKeyPath: String) throws {
         let pem = try String(contentsOfFile: privateKeyPath, encoding: .utf8)
-        self.privateKey = try P256.Signing.PrivateKey(pemRepresentation: pem)
+        try self.init(keyID: keyID, teamID: teamID, pemString: pem)
     }
 
-    init(keyID: String, teamID: String, pemString: String) throws {
-        self.keyID = keyID
-        self.teamID = teamID
-        self.privateKey = try P256.Signing.PrivateKey(pemRepresentation: pemString)
+    convenience init(keyID: String, teamID: String, pemString: String) throws {
+        // Validate the IDs before parsing the key, so a bad ID is reported as such.
+        try Self.validate(keyID: keyID, teamID: teamID)
+        try self.init(keyID: keyID, teamID: teamID,
+                      key: P256.Signing.PrivateKey(pemRepresentation: pemString))
     }
 
-    init(keyID: String, teamID: String, key: P256.Signing.PrivateKey) {
+    init(keyID: String, teamID: String, key: P256.Signing.PrivateKey,
+         now: @escaping @Sendable () -> Date = { Date() }) throws {
+        try Self.validate(keyID: keyID, teamID: teamID)
         self.keyID = keyID
         self.teamID = teamID
         self.privateKey = key
+        self.now = now
+    }
+
+    private static func validate(keyID: String, teamID: String) throws(APNSClientError) {
+        guard APNSValidation.isTenCharacterID(keyID) else { throw .invalidKeyID }
+        guard APNSValidation.isTenCharacterID(teamID) else { throw .invalidTeamID }
     }
 
     // MARK: Token vending
 
-    /// Returns a valid JWT, reusing the cached token if it is less than 55 minutes old.
+    /// Returns the cached JWT, or mints a new one when the cached one is 50 minutes old,
+    /// or was rejected by APNs and is at least 20 minutes old.
     func token() throws -> String {
-        lock.lock()
-        defer { lock.unlock() }
-        if Date().timeIntervalSince(tokenIssuedAt) < 55 * 60, let cached = cachedToken {
-            return cached
+        try lock.withLock {
+            let current = now()
+            if let cached = cachedToken {
+                let age = current.timeIntervalSince(issuedAt)
+                if age < Self.minimumRefreshInterval { return cached }
+                if age < Self.refreshAge && !rejected { return cached }
+            }
+            let token = try makeJWT(issuedAt: current)
+            cachedToken = token
+            issuedAt = current
+            rejected = false
+            return token
         }
-        let token = try makeJWT()
-        cachedToken = token
-        tokenIssuedAt = Date()
-        return token
+    }
+
+    /// Records that APNs rejected `token` (`ExpiredProviderToken` or `InvalidProviderToken`).
+    ///
+    /// - Returns: `true` if the next ``token()`` call will return a different token, either
+    ///   because one has already replaced `token` or because a new one may be minted now.
+    func reject(_ token: String) -> Bool {
+        lock.withLock {
+            guard token == cachedToken else { return true }
+            rejected = true
+            return now().timeIntervalSince(issuedAt) >= Self.minimumRefreshInterval
+        }
     }
 
     // MARK: JWT minting
 
-    private func makeJWT() throws -> String {
-        let iat = Int(Date().timeIntervalSince1970)
-        let headerJSON  = "{\"alg\":\"ES256\",\"kid\":\"\(keyID)\"}"
-        let payloadJSON = "{\"iss\":\"\(teamID)\",\"iat\":\(iat)}"
+    private struct Header: Encodable { let alg: String; let kid: String }
+    private struct Claims: Encodable { let iss: String; let iat: Int }
 
-        let signingInput = b64url(headerJSON) + "." + b64url(payloadJSON)
-        let hash = SHA256.hash(data: Data(signingInput.utf8))
-        let sig  = try privateKey.signature(for: hash)
-        return signingInput + "." + b64urlData(sig.rawRepresentation)
+    private func makeJWT(issuedAt: Date) throws -> String {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let header = try encoder.encode(Header(alg: "ES256", kid: keyID))
+        let claims = try encoder.encode(Claims(iss: teamID, iat: Int(issuedAt.timeIntervalSince1970)))
+        let signingInput = base64URL(header) + "." + base64URL(claims)
+        let signature = try privateKey.signature(for: Data(signingInput.utf8))
+        return signingInput + "." + base64URL(signature.rawRepresentation)
     }
 }
 
-// MARK: - Base64URL helpers (no padding, URL-safe alphabet)
+// MARK: - Redaction
 
-private func b64url(_ string: String) -> String {
-    b64urlData(Data(string.utf8))
+extension APNSCredentials: CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable {
+    var description: String { "APNSCredentials(keyID: \(keyID), teamID: \(teamID), key: <redacted>)" }
+    var debugDescription: String { description }
+    var customMirror: Mirror {
+        Mirror(self, children: ["keyID": keyID, "teamID": teamID, "key": "<redacted>"],
+               displayStyle: .class)
+    }
 }
 
-private func b64urlData(_ data: Data) -> String {
+// MARK: - Base64URL (no padding, URL-safe alphabet)
+
+func base64URL(_ data: Data) -> String {
     data.base64EncodedString()
         .replacingOccurrences(of: "+", with: "-")
         .replacingOccurrences(of: "/", with: "_")

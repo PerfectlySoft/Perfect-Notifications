@@ -1,384 +1,331 @@
 import Testing
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 import Crypto
 @testable import PerfectNotifications
 
-// MARK: - URLProtocol mock
+/// Blocks the calling thread, ignoring cancellation.
+private func blockThread(seconds: TimeInterval) { Thread.sleep(forTimeInterval: seconds) }
 
-final class MockURLProtocol: URLProtocol, @unchecked Sendable {
-    nonisolated(unsafe) static var requestHandler: (@Sendable (URLRequest) -> (HTTPURLResponse, Data))?
-    nonisolated(unsafe) static var lastRequest: URLRequest?
-    nonisolated(unsafe) static var lastBody: Data?
-
-    override class func canInit(with request: URLRequest) -> Bool { true }
-    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
-
-    override func startLoading() {
-        Self.lastBody = Self.readBody(from: request)
-        Self.lastRequest = request
-        guard let handler = Self.requestHandler else {
-            client?.urlProtocol(self, didFailWithError: URLError(.badServerResponse))
-            return
-        }
-        let (response, data) = handler(request)
-        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-        client?.urlProtocol(self, didLoad: data)
-        client?.urlProtocolDidFinishLoading(self)
-    }
-
-    override func stopLoading() {}
-
-    static func readBody(from request: URLRequest) -> Data? {
-        if let b = request.httpBody { return b }
-        guard let stream = request.httpBodyStream else { return nil }
-        stream.open(); defer { stream.close() }
-        var data = Data()
-        var buffer = [UInt8](repeating: 0, count: 4096)
-        while stream.hasBytesAvailable {
-            let n = stream.read(&buffer, maxLength: buffer.count)
-            if n <= 0 { break }
-            data.append(buffer, count: n)
-        }
-        return data
-    }
-}
-
-// MARK: - Helpers
-
-private func makeClient(
-    handler: @escaping @Sendable (URLRequest) -> (HTTPURLResponse, Data)
-) throws -> APNSClient {
-    MockURLProtocol.lastRequest = nil
-    MockURLProtocol.requestHandler = handler
-    let config = URLSessionConfiguration.ephemeral
-    config.protocolClasses = [MockURLProtocol.self]
-    let session = URLSession(configuration: config)
-    let key = P256.Signing.PrivateKey()
-    return try APNSClient(keyID: "TESTKEY1234", teamID: "TEAMID1234",
-                          pemString: key.pemRepresentation,
-                          environment: .sandbox, urlSession: session)
-}
-
-private func okResponse(_ body: String = "{}") -> @Sendable (URLRequest) -> (HTTPURLResponse, Data) {
-    { req in
-        let apnsID = "test-apns-id-\(UUID().uuidString)"
-        let http = HTTPURLResponse(
-            url: req.url!, statusCode: 200, httpVersion: nil,
-            headerFields: ["apns-id": apnsID]
-        )!
-        return (http, Data(body.utf8))
-    }
-}
-
-private func errorResponse(statusCode: Int, reason: String) -> @Sendable (URLRequest) -> (HTTPURLResponse, Data) {
-    { req in
-        let http = HTTPURLResponse(url: req.url!, statusCode: statusCode, httpVersion: nil, headerFields: nil)!
-        let body = "{\"reason\":\"\(reason)\"}"
-        return (http, Data(body.utf8))
-    }
-}
-
-private func unregisteredResponse(at timestamp: Int) -> @Sendable (URLRequest) -> (HTTPURLResponse, Data) {
-    { req in
-        let http = HTTPURLResponse(url: req.url!, statusCode: 410, httpVersion: nil, headerFields: nil)!
-        let body = "{\"reason\":\"Unregistered\",\"timestamp\":\(timestamp)}"
-        return (http, Data(body.utf8))
-    }
-}
-
-// MARK: - Tests
-
+/// Request shape, response parsing, retries, timeouts and redaction, through a
+/// URLProtocol stub. Serialized: the stub's state is shared.
 @Suite(.serialized)
-struct PerfectNotificationsTests {
+struct ClientTests {
 
-    // MARK: Push type
+    // MARK: Request shape
 
-    @Test func pushTypeRawValues() {
-        #expect(APNSPushType.alert.rawValue          == "alert")
-        #expect(APNSPushType.background.rawValue     == "background")
-        #expect(APNSPushType.liveActivity.rawValue   == "liveactivity")
-        #expect(APNSPushType.pushToTalk.rawValue     == "pushtotalk")
-        #expect(APNSPushType.fileProvider.rawValue   == "fileprovider")
-    }
-
-    @Test func backgroundPushTypeHasPriority5() {
-        #expect(APNSPushType.background.defaultPriority == 5)
-        #expect(APNSPushType.alert.defaultPriority      == 10)
-        #expect(APNSPushType.voip.defaultPriority       == 10)
-        #expect(APNSPushType.liveActivity.defaultPriority == 10)
-    }
-
-    // MARK: Payload encoding
-
-    @Test func simpleAlertEncodesToExpectedJSON() throws {
-        let data = try APNSNotificationItem.encodePayload([
-            .alertTitle("Hello"),
-            .alertBody("World"),
-            .badge(3),
-            .sound("default")
-        ])
-        let json = try JSONSerialization.jsonObject(with: data) as! [String: Any]
-        let aps   = json["aps"] as! [String: Any]
-        let alert = aps["alert"] as! [String: Any]
-        #expect(alert["title"] as? String == "Hello")
-        #expect(alert["body"]  as? String == "World")
-        #expect(aps["badge"]   as? Int    == 3)
-        #expect(aps["sound"]   as? String == "default")
-    }
-
-    @Test func bodyOnlyAlertUsesStringNotDict() throws {
-        let data = try APNSNotificationItem.encodePayload([.alertBody("Just a body")])
-        let json = try JSONSerialization.jsonObject(with: data) as! [String: Any]
-        let aps  = json["aps"] as! [String: Any]
-        #expect(aps["alert"] as? String == "Just a body")
-    }
-
-    @Test func contentAvailableAndMutableContentEncodeAsOne() throws {
-        let data = try APNSNotificationItem.encodePayload([.contentAvailable, .mutableContent])
-        let json = try JSONSerialization.jsonObject(with: data) as! [String: Any]
-        let aps  = json["aps"] as! [String: Any]
-        #expect(aps["content-available"] as? Int == 1)
-        #expect(aps["mutable-content"]   as? Int == 1)
-    }
-
-    @Test func subtitleAndInterruptionLevelEncodeCorrectly() throws {
-        let data = try APNSNotificationItem.encodePayload([
-            .alertTitle("Title"),
-            .alertSubtitle("Subtitle"),
-            .interruptionLevel(.timeSensitive),
-            .relevanceScore(0.8)
-        ])
-        let json  = try JSONSerialization.jsonObject(with: data) as! [String: Any]
-        let aps   = json["aps"] as! [String: Any]
-        let alert = aps["alert"] as! [String: Any]
-        #expect(alert["subtitle"]              as? String == "Subtitle")
-        #expect(aps["interruption-level"]      as? String == "time-sensitive")
-        #expect(aps["relevance-score"]         as? Double == 0.8)
-    }
-
-    @Test func customPayloadAppearsAtTopLevel() throws {
-        let data = try APNSNotificationItem.encodePayload([
-            .alertBody("msg"),
-            .customPayload("orderId", "ORD-123"),
-            .customPayload("amount",  49)
-        ])
-        let json = try JSONSerialization.jsonObject(with: data) as! [String: Any]
-        #expect(json["orderId"] as? String == "ORD-123")
-        #expect(json["amount"]  as? Int    == 49)
-    }
-
-    // MARK: JWT structure
-
-    @Test func jwtHasThreeBase64UrlParts() throws {
+    @Test func requestShape() async throws {
         let key = P256.Signing.PrivateKey()
-        let creds = APNSCredentials(keyID: "KEYID12345", teamID: "TEAMID1234", key: key)
-        let token = try creds.token()
-        let parts = token.split(separator: ".", omittingEmptySubsequences: false)
-        #expect(parts.count == 3)
-        // Each part should be non-empty and URL-safe base64 (no padding, no +/)
-        for part in parts {
-            #expect(!part.isEmpty)
-            #expect(!part.contains("+"))
-            #expect(!part.contains("/"))
-            #expect(!part.contains("="))
+        let client = try makeClient(key: key) { _ in ok() }
+        let notification = try APNSNotification(items: [.alertBody("test")])
+        _ = try await client.send(notification, to: token64, topic: "com.example.App",
+                                  expiration: .absolute(1_900_000_000), collapseID: "order-42")
+        let req = try #require(MockURLProtocol.lastRequest)
+        #expect(req.url?.absoluteString == "https://api.sandbox.push.apple.com/3/device/\(token64)")
+        #expect(req.method == "POST")
+        #expect(req.body == notification.payload)
+        #expect(req.header("content-type")     == "application/json")
+        #expect(req.header("apns-topic")       == "com.example.App")
+        #expect(req.header("apns-push-type")   == "alert")
+        #expect(req.header("apns-priority")    == "10")
+        #expect(req.header("apns-expiration")  == "1900000000")
+        #expect(req.header("apns-collapse-id") == "order-42")
+        let jwt = try decodeJWT(try #require(bearer(req)), publicKey: key.publicKey)
+        #expect(jwt.signatureValid)
+        #expect(jwt.header["kid"] as? String == keyID)
+        #expect(jwt.claims["iss"] as? String == teamID)
+    }
+
+    @Test func optionalHeadersAreOmittedByDefault() async throws {
+        let client = try makeClient { _ in ok() }
+        _ = try await client.send(APNSNotification(items: [.alertBody("x")]), to: token64, topic: "com.example.App")
+        let req = try #require(MockURLProtocol.lastRequest)
+        #expect(req.header("apns-expiration") == nil)
+        #expect(req.header("apns-collapse-id") == nil)
+    }
+
+    @Test func productionAndCustomHosts() async throws {
+        var client = try makeClient(environment: .production) { _ in ok() }
+        _ = try await client.send(APNSNotification(items: [.alertBody("x")]), to: token64, topic: "com.example.App")
+        #expect(MockURLProtocol.lastRequest?.url?.absoluteString == "https://api.push.apple.com/3/device/\(token64)")
+
+        client = try makeClient(environment: .custom(host: "localhost", port: 8443)) { _ in ok() }
+        _ = try await client.send(APNSNotification(items: [.alertBody("x")]), to: token64, topic: "com.example.App")
+        #expect(MockURLProtocol.lastRequest?.url?.absoluteString == "https://localhost:8443/3/device/\(token64)")
+
+        for bad: APNSClient.Environment in [.custom(host: "evil.test/x?", port: 443), .custom(host: "a@b", port: 443),
+                                            .custom(host: "localhost", port: 0), .custom(host: "", port: 443)] {
+            #expect(throws: APNSClientError.invalidHost) { try makeClient(environment: bad) { _ in ok() } }
         }
     }
 
-    @Test func jwtHeaderContainsKidAndAlg() throws {
-        let key = P256.Signing.PrivateKey()
-        let creds = APNSCredentials(keyID: "KEYID12345", teamID: "TEAMID1234", key: key)
-        let token = try creds.token()
-        let headerB64 = String(token.split(separator: ".").first!)
-        // Pad for standard base64 decoding
-        let padded = headerB64 + String(repeating: "=", count: (4 - headerB64.count % 4) % 4)
-        let urlDecoded = padded.replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
-        let data = Data(base64Encoded: urlDecoded)!
-        let header = try JSONSerialization.jsonObject(with: data) as! [String: Any]
-        #expect(header["alg"] as? String == "ES256")
-        #expect(header["kid"] as? String == "KEYID12345")
+    @Test func backgroundPushUsesPriority5AndRefusesOthers() async throws {
+        let client = try makeClient { _ in ok() }
+        _ = try await client.sendBackground(to: token64, topic: "com.example.App",
+                                            customData: [.customPayload("refresh", true)])
+        let req = try #require(MockURLProtocol.lastRequest)
+        #expect(req.header("apns-push-type") == "background")
+        #expect(req.header("apns-priority")  == "5")
+        let body = try json(req.body)
+        #expect((body["aps"] as? [String: Any])?["content-available"] as? Int == 1)
+        #expect(body["refresh"] as? Bool == true)
+
+        for priority in [APNSPriority.immediate, .low] {
+            await #expect(throws: APNSClientError.invalidPriority(priority, pushType: .background)) {
+                try await client.send(APNSNotification(items: [.contentAvailable]), to: token64,
+                                      topic: "com.example.App", pushType: .background, priority: priority)
+            }
+        }
+        _ = try await client.send(APNSNotification(items: [.alertBody("x")]), to: token64,
+                                  topic: "com.example.App", priority: .low)
+        #expect(MockURLProtocol.lastRequest?.header("apns-priority") == "1")
     }
 
-    @Test func jwtPayloadContainsIssAndIat() throws {
-        let key = P256.Signing.PrivateKey()
-        let creds = APNSCredentials(keyID: "KEYID12345", teamID: "TEAMID1234", key: key)
-        let beforeMint = Int(Date().timeIntervalSince1970)
-        let token = try creds.token()
-        let afterMint = Int(Date().timeIntervalSince1970)
+    // MARK: Input validation never reaches the transport
 
-        let payloadB64 = String(token.split(separator: ".")[1])
-        let padded = payloadB64 + String(repeating: "=", count: (4 - payloadB64.count % 4) % 4)
-        let urlDecoded = padded.replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
-        let data = Data(base64Encoded: urlDecoded)!
-        let payload = try JSONSerialization.jsonObject(with: data) as! [String: Any]
-        #expect(payload["iss"] as? String == "TEAMID1234")
-        let iat = payload["iat"] as! Int
-        #expect(iat >= beforeMint)
-        #expect(iat <= afterMint)
+    @Test func invalidInputThrowsBeforeAnyRequest() async throws {
+        let client = try makeClient { _ in ok() }
+        let n = try APNSNotification(items: [.alertBody("x")])
+        await #expect(throws: APNSClientError.invalidDeviceToken) {
+            try await client.send(n, to: "../../../3/device/" + token64 + "?", topic: "com.example.App")
+        }
+        await #expect(throws: APNSClientError.invalidTopic) {
+            try await client.send(n, to: token64, topic: "com.example.App\r\nx-injected: 1")
+        }
+        await #expect(throws: APNSClientError.invalidCollapseID) {
+            try await client.send(n, to: token64, topic: "com.example.App", collapseID: "a\r\nb: c")
+        }
+        await #expect(throws: APNSClientError.invalidExpiration) {
+            try await client.send(n, to: token64, topic: "com.example.App", expiration: .relative(.max))
+        }
+        #expect(MockURLProtocol.requests.isEmpty)
     }
 
-    @Test func jwtIsCachedOnSecondCall() throws {
-        let key = P256.Signing.PrivateKey()
-        let creds = APNSCredentials(keyID: "KEYID12345", teamID: "TEAMID1234", key: key)
-        let first  = try creds.token()
-        let second = try creds.token()
-        #expect(first == second)
-    }
-
-    // MARK: Request construction
-
-    @Test func sendBuildsCorrectURL() async throws {
-        let client = try makeClient(handler: okResponse())
-        _ = try await client.send(
-            try APNSNotification(items: [.alertBody("test")]),
-            to: "abc123token",
-            topic: "com.example.App"
-        )
-        let url = MockURLProtocol.lastRequest?.url?.absoluteString
-        #expect(url == "https://api.sandbox.push.apple.com/3/device/abc123token")
-    }
-
-    @Test func sendIncludesRequiredHeaders() async throws {
-        let client = try makeClient(handler: okResponse())
-        _ = try await client.send(
-            try APNSNotification(items: [.alertBody("test")]),
-            to: "tokenXYZ",
-            topic: "com.example.App",
-            pushType: .alert
-        )
-        let req = MockURLProtocol.lastRequest!
-        #expect(req.value(forHTTPHeaderField: "apns-topic")     == "com.example.App")
-        #expect(req.value(forHTTPHeaderField: "apns-push-type") == "alert")
-        #expect(req.value(forHTTPHeaderField: "apns-priority")  == "10")
-        #expect(req.value(forHTTPHeaderField: "content-type")   == "application/json")
-        let auth = req.value(forHTTPHeaderField: "authorization") ?? ""
-        #expect(auth.hasPrefix("bearer "))
-        #expect(auth.split(separator: ".").count == 3) // valid JWT structure
-    }
-
-    @Test func backgroundPushUsesPriority5() async throws {
-        let client = try makeClient(handler: okResponse())
-        _ = try await client.send(
-            try APNSNotification(items: [.contentAvailable]),
-            to: "token",
-            topic: "com.example.App",
-            pushType: .background
-        )
-        #expect(MockURLProtocol.lastRequest?.value(forHTTPHeaderField: "apns-push-type") == "background")
-        #expect(MockURLProtocol.lastRequest?.value(forHTTPHeaderField: "apns-priority")  == "5")
-    }
-
-    @Test func collapseIDHeaderIncludedWhenSet() async throws {
-        let client = try makeClient(handler: okResponse())
-        _ = try await client.send(
-            try APNSNotification(items: [.alertBody("test")]),
-            to: "token", topic: "com.example.App", collapseID: "order-42"
-        )
-        #expect(MockURLProtocol.lastRequest?.value(forHTTPHeaderField: "apns-collapse-id") == "order-42")
-    }
-
-    @Test func productionEnvironmentUsesCorrectHost() async throws {
-        MockURLProtocol.requestHandler = okResponse()
-        let config = URLSessionConfiguration.ephemeral
-        config.protocolClasses = [MockURLProtocol.self]
-        let key = P256.Signing.PrivateKey()
-        let client = try APNSClient(keyID: "KID", teamID: "TID",
-                                    pemString: key.pemRepresentation,
-                                    environment: .production,
-                                    urlSession: URLSession(configuration: config))
-        _ = try await client.send(
-            try APNSNotification(items: [.alertBody("test")]),
-            to: "token", topic: "com.example.App"
-        )
-        let host = MockURLProtocol.lastRequest?.url?.host
-        #expect(host == "api.push.apple.com")
+    @Test func payloadSizeLimits() async throws {
+        let client = try makeClient { _ in ok() }
+        func payload(_ size: Int) -> APNSNotification {
+            let filler = String(repeating: "x", count: size - #"{"aps":{"alert":""}}"#.utf8.count)
+            return APNSNotification(raw: Data(#"{"aps":{"alert":"\#(filler)"}}"#.utf8))
+        }
+        #expect(payload(4096).payload.count == 4096)
+        _ = try await client.send(payload(4096), to: token64, topic: "com.example.App")
+        await #expect(throws: APNSClientError.payloadTooLarge(size: 4097, limit: 4096)) {
+            try await client.send(payload(4097), to: token64, topic: "com.example.App")
+        }
+        _ = try await client.send(payload(5120), to: token64, topic: "com.example.App.voip", pushType: .voip)
+        await #expect(throws: APNSClientError.payloadTooLarge(size: 5121, limit: 5120)) {
+            try await client.send(payload(5121), to: token64, topic: "com.example.App.voip", pushType: .voip)
+        }
+        #expect(MockURLProtocol.requests.count == 2)
     }
 
     // MARK: Response parsing
 
-    @Test func successResponseIsSuccess() async throws {
-        let client = try makeClient(handler: okResponse())
-        let result = try await client.send(
-            try APNSNotification(items: [.alertBody("hi")]),
-            to: "token", topic: "com.example.App"
-        )
+    @Test func successResponse() async throws {
+        let client = try makeClient { _ in ok(apnsID: "ID-1", uniqueID: "UNIQUE-1") }
+        let result = try await client.sendAlert(to: token64, topic: "com.example.App", title: "Hey", body: "World", badge: 2)
+        #expect(result == APNSResponse(statusCode: 200, apnsID: "ID-1", apnsUniqueID: "UNIQUE-1", error: nil))
         #expect(result.isSuccess)
-        #expect(result.statusCode == 200)
-        #expect(result.error == nil)
-        #expect(result.apnsID != nil)
+        let aps = try #require(try json(MockURLProtocol.lastRequest!.body)["aps"] as? [String: Any])
+        #expect((aps["alert"] as? [String: Any])?["title"] as? String == "Hey")
+        #expect(aps["badge"] as? Int == 2)
     }
 
-    @Test func badDeviceTokenResponseParsesReason() async throws {
-        let client = try makeClient(handler: errorResponse(statusCode: 400, reason: "BadDeviceToken"))
-        let result = try await client.send(
-            try APNSNotification(items: [.alertBody("hi")]),
-            to: "badtoken", topic: "com.example.App"
-        )
+    @Test func rejectionParsesReason() async throws {
+        let client = try makeClient { _ in rejected(400, "BadDeviceToken") }
+        let result = try await client.send(APNSNotification(items: [.alertBody("x")]), to: token64, topic: "com.example.App")
         #expect(!result.isSuccess)
         #expect(result.statusCode == 400)
         #expect(result.error?.reason == "BadDeviceToken")
-    }
-
-    @Test func unregisteredResponseIncludesTimestamp() async throws {
-        let ts = 1_700_000_000
-        let client = try makeClient(handler: unregisteredResponse(at: ts))
-        let result = try await client.send(
-            try APNSNotification(items: [.alertBody("hi")]),
-            to: "oldtoken", topic: "com.example.App"
-        )
-        #expect(result.statusCode == 410)
-        #expect(result.error?.reason    == "Unregistered")
-        #expect(result.error?.timestamp == ts)
-    }
-
-    // MARK: Convenience helpers
-
-    @Test func sendAlertBuildsCorrectPayload() async throws {
-        let client = try makeClient(handler: okResponse())
-        _ = try await client.sendAlert(to: "token", topic: "com.example.App",
-                                       title: "Hey", body: "World", badge: 2)
-        let body = MockURLProtocol.lastBody ?? Data()
-        let json = try JSONSerialization.jsonObject(with: body) as! [String: Any]
-        let aps   = json["aps"] as! [String: Any]
-        let alert = aps["alert"] as! [String: Any]
-        #expect(alert["title"] as? String == "Hey")
-        #expect(alert["body"]  as? String == "World")
-        #expect(aps["badge"]   as? Int    == 2)
-        #expect(MockURLProtocol.lastRequest?.value(forHTTPHeaderField: "apns-push-type") == "alert")
-    }
-
-    @Test func sendBackgroundSetsPushTypeAndContentAvailable() async throws {
-        let client = try makeClient(handler: okResponse())
-        _ = try await client.sendBackground(to: "token", topic: "com.example.App",
-                                            customData: [.customPayload("refresh", true)])
-        let body = MockURLProtocol.lastBody ?? Data()
-        let json = try JSONSerialization.jsonObject(with: body) as! [String: Any]
-        let aps  = json["aps"] as! [String: Any]
-        #expect(aps["content-available"] as? Int == 1)
-        #expect(MockURLProtocol.lastRequest?.value(forHTTPHeaderField: "apns-push-type") == "background")
-        #expect(MockURLProtocol.lastRequest?.value(forHTTPHeaderField: "apns-priority")  == "5")
-    }
-
-    // MARK: Live sandbox (gated)
-
-    private var liveEnabled: Bool {
-        ProcessInfo.processInfo.environment["APNS_TESTS"] == "1"
-    }
-
-    @Test func liveSandboxSendAlert() async throws {
-        guard liveEnabled,
-              let keyID   = ProcessInfo.processInfo.environment["APNS_KEY_ID"],
-              let teamID  = ProcessInfo.processInfo.environment["APNS_TEAM_ID"],
-              let keyPath = ProcessInfo.processInfo.environment["APNS_KEY_PATH"],
-              let token   = ProcessInfo.processInfo.environment["APNS_DEVICE_TOKEN"],
-              let topic   = ProcessInfo.processInfo.environment["APNS_TOPIC"] else { return }
-
-        let client = try APNSClient(keyID: keyID, teamID: teamID,
-                                    privateKeyPath: keyPath, environment: .sandbox)
-        let result = try await client.sendAlert(to: token, topic: topic,
-                                                title: "Test", body: "Live sandbox test")
-        if !result.isSuccess {
-            Issue.record("sandbox push failed: \(result.error?.description ?? "HTTP \(result.statusCode)")")
-        }
+        #expect(result.error?.knownReason == .badDeviceToken)
         #expect(result.apnsID != nil)
+    }
+
+    @Test func unregisteredTimestampIsMilliseconds() async throws {
+        let ms: Int64 = 1_700_000_000_123
+        let client = try makeClient { _ in rejected(410, "Unregistered", timestamp: ms) }
+        let result = try await client.send(APNSNotification(items: [.alertBody("x")]), to: token64, topic: "com.example.App")
+        #expect(result.statusCode == 410)
+        #expect(result.error?.knownReason == .unregistered)
+        #expect(result.error?.timestamp == ms)
+        #expect(result.error?.invalidatedAt == Date(timeIntervalSince1970: 1_700_000_000.123))
+    }
+
+    @Test func unknownReasonAndNonJSONBodies() async throws {
+        var client = try makeClient { _ in rejected(400, "SomethingNew") }
+        var result = try await client.send(APNSNotification(items: [.alertBody("x")]), to: token64, topic: "com.example.App")
+        #expect(result.error?.reason == "SomethingNew")
+        #expect(result.error?.knownReason == nil)
+
+        client = try makeClient { _ in .respond(status: 502, headers: [:], body: Data("<html>bad gateway</html>".utf8)) }
+        result = try await client.send(APNSNotification(items: [.alertBody("x")]), to: token64, topic: "com.example.App")
+        #expect(result.statusCode == 502)
+        #expect(result.error == nil)
+    }
+
+    @Test func oversizedResponseBodyIsRefused() async throws {
+        let big = Data(repeating: UInt8(ascii: "x"), count: 64 * 1024)
+        let client = try makeClient { _ in .respond(status: 400, headers: [:], body: big) }
+        await #expect(throws: APNSClientError.responseTooLarge(limit: 16 * 1024)) {
+            try await client.send(APNSNotification(items: [.alertBody("x")]), to: token64, topic: "com.example.App")
+        }
+    }
+
+    @Test func networkFailureIsAClientError() async throws {
+        let client = try makeClient { _ in .fail(.cannotConnectToHost) }
+        do {
+            _ = try await client.send(APNSNotification(items: [.alertBody("x")]), to: token64, topic: "com.example.App")
+            Issue.record("expected a network error")
+        } catch let APNSClientError.network(message) {
+            #expect(message.contains("\(URLError.Code.cannotConnectToHost.rawValue)"))
+            #expect(!message.contains("bearer"))
+        }
+    }
+
+    // MARK: Timeouts and cancellation
+
+    @Test func hangingRequestTimesOut() async throws {
+        let client = try makeClient(timeout: 0.5) { _ in .hang }
+        let start = Date()
+        await #expect(throws: APNSClientError.timedOut) {
+            try await client.send(APNSNotification(items: [.alertBody("x")]), to: token64, topic: "com.example.App")
+        }
+        let elapsed = Date().timeIntervalSince(start)
+        #expect(elapsed >= 0.4 && elapsed < 10)
+    }
+
+    @Test func cancellationIsPrompt() async throws {
+        let client = try makeClient(timeout: 60) { _ in .hang }
+        let task = Task {
+            try await client.send(APNSNotification(items: [.alertBody("x")]), to: token64, topic: "com.example.App")
+        }
+        try await Task.sleep(nanoseconds: 200_000_000)
+        let start = Date()
+        task.cancel()
+        await #expect(throws: CancellationError.self) { try await task.value }
+        #expect(Date().timeIntervalSince(start) < 5)
+    }
+
+    @Test func deadlineReturnsEvenIfTheOperationIgnoresCancellation() async throws {
+        let start = Date()
+        await #expect(throws: APNSClientError.timedOut) {
+            try await withDeadline(seconds: 0.2) { () async -> Int in
+                // Uncooperative work: does not check cancellation.
+                blockThread(seconds: 1.0)
+                return 1
+            }
+        }
+        #expect(Date().timeIntervalSince(start) < 0.9)
+        #expect(try await withDeadline(seconds: 5) { 42 } == 42)
+    }
+
+    // MARK: Provider-token rejections
+
+    @Test func expiredProviderTokenIsRetriedOnceWithAFreshToken() async throws {
+        let clock = TestClock()
+        let client = try makeClient(clock: clock) { i in i == 1 ? rejected(403, "ExpiredProviderToken") : ok() }
+        _ = try await client.send(APNSNotification(items: [.alertBody("x")]), to: token64, topic: "com.example.App")
+        clock.advance(minutes: 25)
+        let result = try await client.send(APNSNotification(items: [.alertBody("x")]), to: token64, topic: "com.example.App")
+        #expect(result.isSuccess)
+        let tokens = MockURLProtocol.requests.map(bearer)
+        #expect(tokens.count == 3)
+        #expect(tokens[0] == tokens[1])
+        #expect(tokens[2] != tokens[1])
+    }
+
+    @Test func expiredProviderTokenIsNotRetriedWithinTwentyMinutes() async throws {
+        let clock = TestClock()
+        let client = try makeClient(clock: clock) { _ in rejected(403, "ExpiredProviderToken") }
+        clock.advance(minutes: 0)
+        let result = try await client.send(APNSNotification(items: [.alertBody("x")]), to: token64, topic: "com.example.App")
+        #expect(result.error?.knownReason == .expiredProviderToken)
+        #expect(MockURLProtocol.requests.count == 1)
+        // Still within 20 minutes: same token, no new mint.
+        clock.advance(minutes: 10)
+        _ = try await client.send(APNSNotification(items: [.alertBody("x")]), to: token64, topic: "com.example.App")
+        #expect(MockURLProtocol.requests.count == 2)
+        #expect(bearer(MockURLProtocol.requests[0]) == bearer(MockURLProtocol.requests[1]))
+        // Past 20 minutes the rejected token is replaced on the next send. That fresh
+        // token is rejected too, and it can't be replaced yet, so there is no retry.
+        clock.advance(minutes: 11)
+        let third = try await client.send(APNSNotification(items: [.alertBody("x")]), to: token64, topic: "com.example.App")
+        #expect(third.error?.knownReason == .expiredProviderToken)
+        let tokens = MockURLProtocol.requests.map(bearer)
+        try #require(tokens.count == 3)
+        #expect(tokens[2] != tokens[1])
+    }
+
+    @Test func invalidProviderTokenInvalidatesWithoutRetry() async throws {
+        let clock = TestClock()
+        let client = try makeClient(clock: clock) { i in i == 0 ? rejected(403, "InvalidProviderToken") : ok() }
+        clock.advance(minutes: 0)
+        let first = try await client.send(APNSNotification(items: [.alertBody("x")]), to: token64, topic: "com.example.App")
+        #expect(first.error?.knownReason == .invalidProviderToken)
+        #expect(MockURLProtocol.requests.count == 1)
+        clock.advance(minutes: 21)    // below the 50-minute refresh, but the token was rejected
+        _ = try await client.send(APNSNotification(items: [.alertBody("x")]), to: token64, topic: "com.example.App")
+        let tokens = MockURLProtocol.requests.map(bearer)
+        #expect(tokens[1] != tokens[0])
+    }
+
+    @Test func tooManyProviderTokenUpdatesKeepsTheToken() async throws {
+        let clock = TestClock()
+        let client = try makeClient(clock: clock) { i in i == 0 ? rejected(429, "TooManyProviderTokenUpdates") : ok() }
+        let first = try await client.send(APNSNotification(items: [.alertBody("x")]), to: token64, topic: "com.example.App")
+        #expect(first.error?.knownReason == .tooManyProviderTokenUpdates)
+        clock.advance(minutes: 30)
+        _ = try await client.send(APNSNotification(items: [.alertBody("x")]), to: token64, topic: "com.example.App")
+        let tokens = MockURLProtocol.requests.map(bearer)
+        #expect(tokens.count == 2)
+        #expect(tokens[0] == tokens[1])
+    }
+
+    // MARK: Batch send
+
+    @Test func batchCarriesPerTokenResults() async throws {
+        let client = try makeClient { i in i == 1 ? rejected(410, "Unregistered", timestamp: 1) : (i == 2 ? .fail(.networkConnectionLost) : ok()) }
+        let other = String(repeating: "cd", count: 32)
+        let third = String(repeating: "ef", count: 32)
+        let fourth = String(repeating: "01", count: 32)
+        let results = try await client.send(APNSNotification(items: [.alertBody("x")]),
+                                            to: [token64, "not-a-token", other, third, fourth],
+                                            topic: "com.example.App")
+        #expect(results.map(\.deviceToken) == [token64, "not-a-token", other, third, fourth])
+        #expect(try results[0].result.get().isSuccess)
+        #expect(throws: APNSClientError.invalidDeviceToken) { try results[1].result.get() }
+        #expect(try results[2].result.get().error?.knownReason == .unregistered)
+        guard case .failure(.network) = results[3].result else { Issue.record("expected network failure"); return }
+        #expect(try results[4].result.get().isSuccess)
+        #expect(MockURLProtocol.requests.count == 4)
+    }
+
+    @Test func batchSharedProblemsThrowBeforeSending() async throws {
+        let client = try makeClient { _ in ok() }
+        await #expect(throws: APNSClientError.invalidTopic) {
+            try await client.send(APNSNotification(items: [.alertBody("x")]), to: [token64, token64], topic: "bad topic")
+        }
+        #expect(MockURLProtocol.requests.isEmpty)
+    }
+
+    // MARK: Redaction
+
+    @Test func clientNeverPrintsTheKeyOrToken() async throws {
+        let key = P256.Signing.PrivateKey()
+        let client = try makeClient(key: key) { _ in ok() }
+        _ = try await client.send(APNSNotification(items: [.alertBody("x")]), to: token64, topic: "com.example.App")
+        let token = try #require(bearer(MockURLProtocol.lastRequest))
+        var dumped = ""
+        dump(client, to: &dumped)
+        let mirrored = Mirror(reflecting: client).children.map { "\($0.label ?? ""): \($0.value)" }.joined(separator: "\n")
+        for text in ["\(client)", String(reflecting: client), dumped, mirrored] {
+            #expect(!text.contains(token))
+            #expect(!text.contains(String(token.split(separator: ".")[2])))
+            #expect(!text.contains(key.rawRepresentation.base64EncodedString()))
+            #expect(!text.contains("PRIVATE KEY"))
+            #expect(text.contains(keyID))
+        }
     }
 }
