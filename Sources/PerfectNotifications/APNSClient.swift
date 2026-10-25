@@ -11,7 +11,7 @@ public enum APNSClientError: Error, Sendable, Equatable, CustomStringConvertible
     case invalidDeviceToken
     /// The topic is not a bundle ID (dot-separated ASCII letters, digits and `-`).
     case invalidTopic
-    /// The collapse ID is empty, longer than 64 bytes, or contains a control character.
+    /// The collapse ID is not 1–64 printable ASCII characters (`!` through `~`, no spaces).
     case invalidCollapseID
     /// The priority isn't allowed for the push type (background pushes must use `.background`).
     case invalidPriority(APNSPriority, pushType: APNSPushType)
@@ -31,6 +31,11 @@ public enum APNSClientError: Error, Sendable, Equatable, CustomStringConvertible
     case reservedPayloadKey(String)
     /// ``APNSJSONValue/init(jsonObject:)`` met a value it can't represent.
     case invalidJSONValue(String)
+    /// A payload value is out of range (`badge` < 0, `relevanceScore` outside 0–1), or raw
+    /// payload bytes aren't a JSON object with an `aps` dictionary.
+    case invalidPayload(String)
+    /// JSON nested deeper than the limit (64 levels).
+    case jsonNestingTooDeep(limit: Int)
     /// Signing the provider token failed.
     case tokenSigningFailed
     /// The request did not complete within the client's timeout.
@@ -42,12 +47,18 @@ public enum APNSClientError: Error, Sendable, Equatable, CustomStringConvertible
     case network(String)
     /// The response was not HTTP.
     case invalidResponse
+    /// The server answered with a redirect (or for another origin). APNs never redirects,
+    /// and the client never follows one, so the provider token stays with the APNs host.
+    case unexpectedRedirect(statusCode: Int)
+    /// In a batch send: the batch was cancelled before or while this token's request ran.
+    /// A token whose request was in flight may or may not have been delivered.
+    case cancelled
 
     public var description: String {
         switch self {
         case .invalidDeviceToken: return "invalid device token (expected 64-200 hex digits)"
         case .invalidTopic: return "invalid apns-topic"
-        case .invalidCollapseID: return "invalid apns-collapse-id (1-64 bytes, no control characters)"
+        case .invalidCollapseID: return "invalid apns-collapse-id (1-64 printable ASCII characters, no spaces)"
         case .invalidPriority(let p, let t): return "priority \(p.rawValue) is not allowed for push type \(t.rawValue)"
         case .invalidExpiration: return "invalid apns-expiration"
         case .invalidKeyID: return "invalid key ID (expected 10 letters or digits)"
@@ -57,11 +68,15 @@ public enum APNSClientError: Error, Sendable, Equatable, CustomStringConvertible
         case .payloadTooLarge(let size, let limit): return "payload is \(size) bytes; the limit is \(limit)"
         case .reservedPayloadKey(let k): return "custom payload key \"\(k)\" is reserved"
         case .invalidJSONValue(let t): return "not a JSON value: \(t)"
+        case .invalidPayload(let why): return "invalid payload: \(why)"
+        case .jsonNestingTooDeep(let limit): return "JSON nested deeper than \(limit) levels"
         case .tokenSigningFailed: return "signing the provider token failed"
         case .timedOut: return "request timed out"
         case .responseTooLarge(let limit): return "response body exceeded \(limit) bytes"
         case .network(let s): return "network error: \(s)"
         case .invalidResponse: return "response was not HTTP"
+        case .unexpectedRedirect(let status): return "unexpected redirect (HTTP \(status)); not followed"
+        case .cancelled: return "cancelled"
         }
     }
 }
@@ -126,7 +141,7 @@ public struct APNSClient: Sendable {
     public let environment: Environment
     /// The whole-request deadline, in seconds, covering connect, send and response.
     public let timeout: TimeInterval
-    private let urlSession: URLSession
+    private let transport: APNSTransport
 
     // MARK: Init
 
@@ -137,7 +152,10 @@ public struct APNSClient: Sendable {
     ///   - teamID: Your 10-character Apple Developer Team ID.
     ///   - privateKeyPath: Path to the `.p8` private key file.
     ///   - environment: `.sandbox` (default) or `.production`.
-    ///   - urlSession: Custom session for testing or certificate pinning.
+    ///   - urlSession: Its configuration (protocol classes, proxies, TLS settings) is used,
+    ///     and its delegate receives authentication challenges, so certificate pinning keeps
+    ///     working. The client sends through its own session built from it, which never
+    ///     follows redirects.
     ///   - timeout: Whole-request deadline in seconds (default 30).
     /// - Throws: ``APNSClientError/invalidKeyID``, ``APNSClientError/invalidTeamID``,
     ///   ``APNSClientError/invalidHost``, ``APNSClientError/invalidTimeout``, a file error,
@@ -149,7 +167,7 @@ public struct APNSClient: Sendable {
         try Self.validate(environment: environment, timeout: timeout)
         self.credentials = try APNSCredentials(keyID: keyID, teamID: teamID, privateKeyPath: privateKeyPath)
         self.environment = environment
-        self.urlSession  = urlSession
+        self.transport  = APNSTransport(basedOn: urlSession, maxBodySize: Self.maxResponseBodySize)
         self.timeout     = timeout
     }
 
@@ -161,7 +179,7 @@ public struct APNSClient: Sendable {
         try Self.validate(environment: environment, timeout: timeout)
         self.credentials = try APNSCredentials(keyID: keyID, teamID: teamID, pemString: pemString)
         self.environment = environment
-        self.urlSession  = urlSession
+        self.transport  = APNSTransport(basedOn: urlSession, maxBodySize: Self.maxResponseBodySize)
         self.timeout     = timeout
     }
 
@@ -170,7 +188,7 @@ public struct APNSClient: Sendable {
         try Self.validate(environment: environment, timeout: timeout)
         self.credentials = credentials
         self.environment = environment
-        self.urlSession  = urlSession
+        self.transport  = APNSTransport(basedOn: urlSession, maxBodySize: Self.maxResponseBodySize)
         self.timeout     = timeout
     }
 
@@ -216,7 +234,11 @@ public struct APNSClient: Sendable {
     /// Returns one ``APNSBatchResult`` per token, in order. A token that fails (invalid
     /// token, network error, timeout) gets a `.failure` and the rest are still sent.
     /// Problems shared by every token (topic, priority, payload size, …) throw before
-    /// anything is sent, and cancellation throws `CancellationError`.
+    /// anything is sent.
+    ///
+    /// Cancelling the calling task doesn't throw away what was already sent: tokens that
+    /// were sent keep their results, the token in flight and every later one get
+    /// `.failure(.cancelled)`. (The one in flight may still have been delivered.)
     public func send(
         _ notification: APNSNotification,
         to deviceTokens: [String],
@@ -231,12 +253,18 @@ public struct APNSClient: Sendable {
         var results = [APNSBatchResult]()
         results.reserveCapacity(deviceTokens.count)
         for token in deviceTokens {
-            try Task.checkCancellation()
+            if Task.isCancelled {
+                results.append(APNSBatchResult(deviceToken: token, result: .failure(.cancelled)))
+                continue
+            }
             let result: Result<APNSResponse, APNSClientError>
             do {
                 result = .success(try await deliver(prepared, to: token))
             } catch let error as APNSClientError {
                 result = .failure(error)
+            } catch {
+                // CancellationError: this token's request was in flight.
+                result = .failure(.cancelled)
             }
             results.append(APNSBatchResult(deviceToken: token, result: result))
         }
@@ -367,14 +395,19 @@ public struct APNSClient: Sendable {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.httpBody = prepared.body
-        request.timeoutInterval = timeout
+        // The deadline is enforced by the transport. URLSession's own idle timeout is set
+        // past it so the two never race (and because corelibs truncates it to whole
+        // seconds: a value under 1 s fails at once).
+        request.timeoutInterval = (timeout + 5).rounded(.up)
         for (name, value) in prepared.headers { request.setValue(value, forHTTPHeaderField: name) }
         request.setValue("bearer \(jwt)", forHTTPHeaderField: "authorization")
 
-        let session = urlSession
-        let request_ = request
-        let (data, http) = try await withDeadline(seconds: timeout) {
-            try await Self.load(request_, session: session)
+        let (data, http) = try await transport.send(request, deadline: timeout)
+
+        // APNs never redirects, and the transport refuses to follow one. A 3xx, or a
+        // response for another origin, is reported rather than read as a result.
+        if (300...399).contains(http.statusCode) || http.url.map({ !Self.sameOrigin($0, url) }) == true {
+            throw APNSClientError.unexpectedRedirect(statusCode: http.statusCode)
         }
 
         let apnsID = http.value(forHTTPHeaderField: "apns-id")
@@ -389,49 +422,10 @@ public struct APNSClient: Sendable {
         return APNSResponse(statusCode: http.statusCode, apnsID: apnsID, apnsUniqueID: uniqueID, error: error)
     }
 
-    /// Loads the response, reading at most ``maxResponseBodySize`` bytes of body.
-    private static func load(_ request: URLRequest, session: URLSession) async throws -> (Data, HTTPURLResponse) {
-        let limit = maxResponseBodySize
-        do {
-            #if canImport(FoundationNetworking)
-            // corelibs Foundation has no streaming `bytes(for:)`, and keeps reading a body
-            // after its task is cancelled, so the size is checked once the body is in.
-            // The whole-request deadline still bounds how long that can take.
-            let (data, response) = try await session.data(for: request)
-            guard let http = response as? HTTPURLResponse else { throw APNSClientError.invalidResponse }
-            guard data.count <= limit else { throw APNSClientError.responseTooLarge(limit: limit) }
-            return (data, http)
-            #else
-            let (bytes, response) = try await session.bytes(for: request)
-            guard let http = response as? HTTPURLResponse else {
-                bytes.task.cancel()
-                throw APNSClientError.invalidResponse
-            }
-            if http.expectedContentLength > Int64(limit) {
-                bytes.task.cancel()
-                throw APNSClientError.responseTooLarge(limit: limit)
-            }
-            var data = Data()
-            for try await byte in bytes {
-                data.append(byte)
-                if data.count > limit {
-                    bytes.task.cancel()
-                    throw APNSClientError.responseTooLarge(limit: limit)
-                }
-            }
-            return (data, http)
-            #endif
-        } catch let error as APNSClientError {
-            throw error
-        } catch is CancellationError {
-            throw CancellationError()
-        } catch let error as URLError {
-            if error.code == .timedOut { throw APNSClientError.timedOut }
-            if error.code == .cancelled && Task.isCancelled { throw CancellationError() }
-            throw APNSClientError.network("URLError \(error.code.rawValue): \(error.localizedDescription)")
-        } catch {
-            throw APNSClientError.network(error.localizedDescription)
-        }
+    private static func sameOrigin(_ a: URL, _ b: URL) -> Bool {
+        a.scheme?.lowercased() == b.scheme?.lowercased()
+            && a.host?.lowercased() == b.host?.lowercased()
+            && (a.port ?? 443) == (b.port ?? 443)
     }
 }
 
@@ -450,83 +444,5 @@ extension APNSClient: CustomStringConvertible, CustomDebugStringConvertible, Cus
             "teamID": credentials.teamID,
             "timeout": timeout,
         ], displayStyle: .struct)
-    }
-}
-
-// MARK: - Deadline
-
-/// Runs `operation` with a deadline. Returns as soon as the operation finishes, the
-/// deadline passes (``APNSClientError/timedOut``) or the calling task is cancelled
-/// (`CancellationError`), even if the operation ignores cancellation; the operation is
-/// cancelled in the latter two cases.
-func withDeadline<T: Sendable>(
-    seconds: TimeInterval,
-    _ operation: @escaping @Sendable () async throws -> T
-) async throws -> T {
-    let race = DeadlineRace<T>()
-    return try await withTaskCancellationHandler {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<T, any Error>) in
-            let work = Task {
-                do { race.finish(.success(try await operation())) }
-                catch { race.finish(.failure(error)) }
-            }
-            let nanos = UInt64(min(seconds, 86_400) * 1_000_000_000)
-            let timer = Task {
-                try? await Task.sleep(nanoseconds: nanos)
-                if !Task.isCancelled { race.finish(.failure(APNSClientError.timedOut)) }
-            }
-            race.start(continuation, tasks: [work, timer])
-        }
-    } onCancel: {
-        race.finish(.failure(CancellationError()))
-    }
-}
-
-private final class DeadlineRace<T: Sendable>: @unchecked Sendable {
-    private let lock = NSLock()
-    private var continuation: CheckedContinuation<T, any Error>?
-    private var tasks: [Task<Void, Never>] = []
-    private var pending: Result<T, any Error>?
-    private var done = false
-
-    func start(_ continuation: CheckedContinuation<T, any Error>, tasks: [Task<Void, Never>]) {
-        let early: Result<T, any Error>? = lock.withLock {
-            if let pending = self.pending { self.done = true; return pending }
-            self.continuation = continuation
-            self.tasks = tasks
-            return nil
-        }
-        if let early {
-            continuation.resume(with: early)
-            Self.cancel(tasks)
-        }
-    }
-
-    func finish(_ result: Result<T, any Error>) {
-        let (continuation, tasks): (CheckedContinuation<T, any Error>?, [Task<Void, Never>]) = lock.withLock {
-            guard !done else { return (nil, []) }
-            guard let c = self.continuation else {
-                // Not started yet (cancelled before the continuation existed): remember the
-                // first result for start().
-                if pending == nil { pending = result }
-                return (nil, [])
-            }
-            done = true
-            self.continuation = nil
-            defer { self.tasks = [] }
-            return (c, self.tasks)
-        }
-        continuation?.resume(with: result)
-        Self.cancel(tasks)
-    }
-
-    /// Cancels off the cooperative pool, after the caller has been resumed. On Linux,
-    /// cancelling a `URLSession` data task from its async API sometimes blocks the
-    /// cancelling thread indefinitely (seen in about 1 run in 20 against a server that
-    /// never answers); the caller must not wait for that, and it must not pin a
-    /// Swift-concurrency thread.
-    private static func cancel(_ tasks: [Task<Void, Never>]) {
-        guard !tasks.isEmpty else { return }
-        DispatchQueue.global().async { tasks.forEach { $0.cancel() } }
     }
 }

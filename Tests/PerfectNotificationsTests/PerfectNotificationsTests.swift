@@ -6,9 +6,6 @@ import FoundationNetworking
 import Crypto
 @testable import PerfectNotifications
 
-/// Blocks the calling thread, ignoring cancellation.
-private func blockThread(seconds: TimeInterval) { Thread.sleep(forTimeInterval: seconds) }
-
 /// Request shape, response parsing, retries, timeouts and redaction, through a
 /// URLProtocol stub. Serialized: the stub's state is shared.
 @Suite(.serialized)
@@ -107,7 +104,7 @@ struct ClientTests {
         let client = try makeClient { _ in ok() }
         func payload(_ size: Int) -> APNSNotification {
             let filler = String(repeating: "x", count: size - #"{"aps":{"alert":""}}"#.utf8.count)
-            return APNSNotification(raw: Data(#"{"aps":{"alert":"\#(filler)"}}"#.utf8))
+            return try! APNSNotification(raw: Data(#"{"aps":{"alert":"\#(filler)"}}"#.utf8))
         }
         #expect(payload(4096).payload.count == 4096)
         _ = try await client.send(payload(4096), to: token64, topic: "com.example.App")
@@ -115,8 +112,8 @@ struct ClientTests {
             try await client.send(payload(4097), to: token64, topic: "com.example.App")
         }
         _ = try await client.send(payload(5120), to: token64, topic: "com.example.App.voip", pushType: .voip)
-        await #expect(throws: APNSClientError.payloadTooLarge(size: 5121, limit: 5120)) {
-            try await client.send(payload(5121), to: token64, topic: "com.example.App.voip", pushType: .voip)
+        #expect(throws: APNSClientError.payloadTooLarge(size: 5121, limit: 5120)) {
+            try APNSNotification(raw: Data(repeating: UInt8(ascii: " "), count: 5121))
         }
         #expect(MockURLProtocol.requests.count == 2)
     }
@@ -208,17 +205,47 @@ struct ClientTests {
         #expect(Date().timeIntervalSince(start) < 5)
     }
 
-    @Test func deadlineReturnsEvenIfTheOperationIgnoresCancellation() async throws {
+    @Test func subSecondDeadlineWithAPromptServerSucceeds() async throws {
+        // corelibs truncates URLRequest.timeoutInterval to whole seconds, so a 0.5 s value
+        // used to fail at once on Linux. The client's own deadline handles fractions.
+        let client = try makeClient(timeout: 0.5) { _ in ok() }
+        let result = try await client.send(APNSNotification(items: [.alertBody("x")]), to: token64, topic: "com.example.App")
+        #expect(result.isSuccess)
         let start = Date()
+        let hung = try makeClient(timeout: 0.5) { _ in .hang }
         await #expect(throws: APNSClientError.timedOut) {
-            try await withDeadline(seconds: 0.2) { () async -> Int in
-                // Uncooperative work: does not check cancellation.
-                blockThread(seconds: 1.0)
-                return 1
-            }
+            try await hung.send(APNSNotification(items: [.alertBody("x")]), to: token64, topic: "com.example.App")
         }
-        #expect(Date().timeIntervalSince(start) < 0.9)
-        #expect(try await withDeadline(seconds: 5) { 42 } == 42)
+        #expect(Date().timeIntervalSince(start) >= 0.4)
+    }
+
+    @Test func urlSessionIdleTimeoutIsPastTheDeadline() async throws {
+        let client = try makeClient(timeout: 0.5) { _ in ok() }
+        _ = try await client.send(APNSNotification(items: [.alertBody("x")]), to: token64, topic: "com.example.App")
+        // Recorded by the stub from the request as sent; the deadline itself is 0.5 s.
+        #expect(MockURLProtocol.lastTimeout == 6)
+    }
+
+    // MARK: Redirects
+
+    @Test func redirectStatusIsAnErrorNotASuccess() async throws {
+        for status in [301, 302, 307, 308] {
+            let client = try makeClient { _ in
+                .respond(status: status, headers: ["location": "https://evil.test/3/device/\(token64)"], body: Data())
+            }
+            await #expect(throws: APNSClientError.unexpectedRedirect(statusCode: status)) {
+                try await client.send(APNSNotification(items: [.alertBody("x")]), to: token64, topic: "com.example.App")
+            }
+            #expect(MockURLProtocol.requests.count == 1)
+            #expect(MockURLProtocol.requests.allSatisfy { $0.url?.host == "api.sandbox.push.apple.com" })
+        }
+    }
+
+    @Test func responseFromAnotherOriginIsRefused() async throws {
+        let client = try makeClient { _ in .respondFrom(url: "https://evil.test/3/device/x", status: 200) }
+        await #expect(throws: APNSClientError.unexpectedRedirect(statusCode: 200)) {
+            try await client.send(APNSNotification(items: [.alertBody("x")]), to: token64, topic: "com.example.App")
+        }
     }
 
     // MARK: Provider-token rejections
@@ -300,6 +327,24 @@ struct ClientTests {
         guard case .failure(.network) = results[3].result else { Issue.record("expected network failure"); return }
         #expect(try results[4].result.get().isSuccess)
         #expect(MockURLProtocol.requests.count == 4)
+    }
+
+    @Test func cancellingABatchKeepsTheResultsSoFar() async throws {
+        let client = try makeClient(timeout: 60) { i in i < 2 ? ok() : .hang }
+        let tokens = ["aa", "bb", "cc", "dd"].map { String(repeating: $0, count: 32) }
+        let task = Task {
+            try await client.send(APNSNotification(items: [.alertBody("x")]), to: tokens, topic: "com.example.App")
+        }
+        try await Task.sleep(nanoseconds: 300_000_000)
+        task.cancel()
+        let results = try await task.value
+        #expect(results.map(\.deviceToken) == tokens)
+        #expect(try results[0].result.get().isSuccess)
+        #expect(try results[1].result.get().isSuccess)
+        #expect(results[2].result == .failure(.cancelled))     // in flight
+        #expect(results[3].result == .failure(.cancelled))     // never started
+        #expect(MockURLProtocol.requests.count == 3)
+        #expect(results[2] == APNSBatchResult(deviceToken: tokens[2], result: .failure(.cancelled)))
     }
 
     @Test func batchSharedProblemsThrowBeforeSending() async throws {

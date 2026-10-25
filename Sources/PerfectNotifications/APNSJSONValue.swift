@@ -54,17 +54,39 @@ public enum APNSJSONValue: Sendable, Hashable, Codable {
     /// The conversion happens immediately, so the result is genuinely `Sendable`.
     ///
     /// - Throws: ``APNSClientError/invalidJSONValue(_:)`` naming the first unsupported type
-    ///   (or a non-finite number).
+    ///   (or a non-finite or out-of-range number), or ``APNSClientError/jsonNestingTooDeep(limit:)``
+    ///   past 64 levels.
     public init(jsonObject value: Any) throws {
-        self = try Self.convert(value)
+        self = try Self.convert(value, depth: 0)
     }
 
-    private static func convert(_ value: Any) throws -> APNSJSONValue {
+    /// The nesting depth: 0 for a scalar, 1 for a flat array or object. Iterative, so a
+    /// hostile value can't overflow the stack while being measured.
+    var depth: Int {
+        var deepest = 0
+        var stack: [(APNSJSONValue, Int)] = [(self, 0)]
+        while let (value, level) = stack.popLast() {
+            switch value {
+            case .array(let a):
+                deepest = max(deepest, level + 1)
+                stack.append(contentsOf: a.map { ($0, level + 1) })
+            case .object(let o):
+                deepest = max(deepest, level + 1)
+                stack.append(contentsOf: o.values.map { ($0, level + 1) })
+            default:
+                break
+            }
+        }
+        return deepest
+    }
+
+    private static func convert(_ value: Any, depth: Int) throws -> APNSJSONValue {
+        // `depth` counts the containers around `value`.
         // Unwrap Optional<Wrapped> boxed in Any.
         let mirror = Mirror(reflecting: value)
         if mirror.displayStyle == .optional {
             guard let wrapped = mirror.children.first?.value else { return .null }
-            return try convert(wrapped)
+            return try Self.convert(wrapped, depth: depth)
         }
         // Exact native Swift types first: on Darwin `as? NSNumber` would also match
         // these through bridging, and `as? Bool` would match NSNumber(1).
@@ -80,12 +102,19 @@ public enum APNSJSONValue: Sendable, Hashable, Codable {
         case let v as UInt where type(of: value) == UInt.self:
             guard let i = Int(exactly: v) else { throw APNSClientError.invalidJSONValue("UInt out of range") }
             return .int(i)
+        case let v as UInt64 where type(of: value) == UInt64.self:
+            guard let i = Int(exactly: v) else { throw APNSClientError.invalidJSONValue("UInt64 out of range") }
+            return .int(i)
         case let v as Double where type(of: value) == Double.self: return try finite(v)
         case let v as Float where type(of: value) == Float.self: return try finite(Double(v))
         case is NSNull: return .null
         case let n as NSNumber: return try convert(number: n)
-        case let a as [Any]: return .array(try a.map(convert))
-        case let o as [String: Any]: return .object(try o.mapValues(convert))
+        case let a as [Any]:
+            guard depth < APNSValidation.maxJSONDepth else { throw APNSClientError.jsonNestingTooDeep(limit: APNSValidation.maxJSONDepth) }
+            return .array(try a.map { try Self.convert($0, depth: depth + 1) })
+        case let o as [String: Any]:
+            guard depth < APNSValidation.maxJSONDepth else { throw APNSClientError.jsonNestingTooDeep(limit: APNSValidation.maxJSONDepth) }
+            return .object(try o.mapValues { try Self.convert($0, depth: depth + 1) })
         default:
             throw APNSClientError.invalidJSONValue(String(describing: type(of: value)))
         }
@@ -109,6 +138,10 @@ public enum APNSJSONValue: Sendable, Hashable, Codable {
             #endif
         case "f", "d":
             return try finite(n.doubleValue)
+        case "Q", "L":
+            // Unsigned 64-bit: `int64Value` would wrap values above Int64.max to negatives.
+            guard let i = Int(exactly: n.uint64Value) else { throw APNSClientError.invalidJSONValue("number out of range") }
+            return .int(i)
         default:
             guard let i = Int(exactly: n.int64Value) else { throw APNSClientError.invalidJSONValue("number out of range") }
             return .int(i)

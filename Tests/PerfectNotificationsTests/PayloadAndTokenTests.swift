@@ -108,7 +108,83 @@ struct PayloadTests {
         #expect(APNSNotificationItem.customPayload("k", 1) == .customPayload("k", .int(1)))
     }
 
+    @Test func badgeAndRelevanceScoreRanges() throws {
+        _ = try APNSNotification(items: [.badge(0), .relevanceScore(0), .relevanceScore(1)])
+        #expect(throws: APNSClientError.invalidPayload("badge must not be negative")) {
+            try APNSNotification(items: [.badge(-1)])
+        }
+        for score in [-0.01, 1.01, .nan, .infinity] {
+            #expect(throws: APNSClientError.invalidPayload("relevanceScore must be 0-1")) {
+                try APNSNotification(items: [.relevanceScore(score)])
+            }
+        }
+    }
+
+    @Test func rawPayloadMustBeAnObjectWithAps() throws {
+        let ok = try APNSNotification(raw: Data(#"{"aps":{"alert":"x"},"k":1}"#.utf8))
+        #expect(ok.payload.count == 27)
+        for bad in ["", "[]", "\"aps\"", #"{"aps":"x"}"#, #"{"alert":"x"}"#, "{garbage", #"{"aps":{}"#] {
+            #expect(throws: APNSClientError.self) { try APNSNotification(raw: Data(bad.utf8)) }
+        }
+    }
+
+    // MARK: Nesting depth
+
+    static func nestedArrays(_ depth: Int) -> APNSJSONValue {
+        var v: APNSJSONValue = 1
+        for _ in 0..<depth { v = .array([v]) }
+        return v
+    }
+
+    /// Runs `body` on a thread with a 64 MiB stack: building and destroying a 20,000-deep
+    /// value recurses in Swift's own value witnesses, which the test thread's stack can't
+    /// take. The point is that the library itself doesn't recurse into it.
+    static func onBigStack(_ body: @escaping @Sendable () -> Void) async {
+        await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in
+            let thread = Thread { body(); done.resume() }
+            thread.stackSize = 64 << 20
+            thread.start()
+        }
+    }
+
+    @Test func deepNestingIsRefusedWithoutCrashing() async throws {
+        // Depth 20,000 used to overflow the stack in encodePayload and convert.
+        await Self.onBigStack {
+            #expect(throws: APNSClientError.jsonNestingTooDeep(limit: 64)) {
+                try APNSNotification(items: [.customPayload("deep", Self.nestedArrays(20_000))])
+            }
+            var any: Any = 1
+            for _ in 0..<20_000 { any = [any] }
+            #expect(throws: APNSClientError.jsonNestingTooDeep(limit: 64)) { try APNSJSONValue(jsonObject: any) }
+            let raw = String(repeating: "[", count: 20_000) + String(repeating: "]", count: 20_000)
+            #expect(throws: (any Error).self) { try APNSNotification(raw: Data(#"{"aps":{},"x":\#(raw)}"#.utf8)) }
+        }
+        // The boundary: 63 levels under a top-level key (64 with the payload object) is fine.
+        _ = try APNSNotification(items: [.customPayload("ok", Self.nestedArrays(63))])
+        #expect(throws: APNSClientError.jsonNestingTooDeep(limit: 64)) {
+            try APNSNotification(items: [.customPayload("deep", Self.nestedArrays(64))])
+        }
+        var sixtyFour: Any = 1
+        for _ in 0..<64 { sixtyFour = [sixtyFour] }
+        #expect(try APNSJSONValue(jsonObject: sixtyFour) == Self.nestedArrays(64))
+        sixtyFour = [sixtyFour]
+        #expect(throws: APNSClientError.jsonNestingTooDeep(limit: 64)) { try APNSJSONValue(jsonObject: sixtyFour) }
+    }
+
     // MARK: APNSJSONValue
+
+    @Test func unsignedValuesAboveIntMaxAreRefused() throws {
+        #expect(throws: APNSClientError.self) { try APNSJSONValue(jsonObject: UInt64.max) }
+        #expect(throws: APNSClientError.self) { try APNSJSONValue(jsonObject: NSNumber(value: UInt64.max)) }
+        #expect(throws: APNSClientError.self) { try APNSJSONValue(jsonObject: UInt(Int.max) + 1) }
+        #expect(try APNSJSONValue(jsonObject: UInt64(Int.max)) == .int(Int.max))
+        #expect(try APNSJSONValue(jsonObject: NSNumber(value: UInt64(42))) == 42)
+        // Whatever JSONSerialization makes of 2^64 - 1, it must not come out as -1.
+        let parsed = try JSONSerialization.jsonObject(with: Data("[18446744073709551615]".utf8))
+        if let value = try? APNSJSONValue(jsonObject: parsed) {
+            #expect(value != [-1])
+        }
+    }
 
     @Test func jsonObjectConversionFromJSONSerialization() throws {
         let parsed = try JSONSerialization.jsonObject(with: Data(
@@ -173,10 +249,12 @@ struct PayloadTests {
 
     @Test func collapseIDLimits() throws {
         try APNSValidation.collapseID(String(repeating: "x", count: 64))
-        try APNSValidation.collapseID(String(repeating: "é", count: 32))     // 64 bytes
+        try APNSValidation.collapseID("order-42:v2_(a)~!")
         #expect(throws: APNSClientError.invalidCollapseID) { try APNSValidation.collapseID(String(repeating: "x", count: 65)) }
-        #expect(throws: APNSClientError.invalidCollapseID) { try APNSValidation.collapseID(String(repeating: "é", count: 33)) }
-        for bad in ["", "a\r\nb: c", "a\nb", "a\u{0}b", "a\u{7F}", "a\u{85}", "a\u{2028}b", "tab\there"] {
+        // The reviewer's cases: leading space, trailing space, bidi override + ZWJ.
+        for bad in [" lead", "trail ", "a\u{202E}b\u{200D}",
+                    "", "inner space", "é-collapse", "a\r\nb: c", "a\nb", "a\u{0}b", "a\u{7F}", "a\u{85}",
+                    "a\u{2028}b", "tab\there"] {
             #expect(throws: APNSClientError.invalidCollapseID) { try APNSValidation.collapseID(bad) }
         }
     }
@@ -196,7 +274,7 @@ struct PayloadTests {
     @Test func jwtHasExactHeaderAndClaimsAndAValidSignature() throws {
         let key = P256.Signing.PrivateKey()
         let clock = TestClock()
-        let creds = try APNSCredentials(keyID: keyID, teamID: teamID, key: key, now: { clock.now })
+        let creds = try credentials(key, clock: clock)
         let jwt = try decodeJWT(creds.token(), publicKey: key.publicKey)
         #expect(jwt.headerJSON == #"{"alg":"ES256","kid":"ABCDE12345"}"#)
         #expect(jwt.claimsJSON == #"{"iat":1800000000,"iss":"TEAM123456"}"#)
@@ -229,8 +307,7 @@ struct PayloadTests {
 
     @Test func tokenIsCachedThenRefreshedAtFiftyMinutes() throws {
         let clock = TestClock()
-        let creds = try APNSCredentials(keyID: keyID, teamID: teamID, key: P256.Signing.PrivateKey(),
-                                        now: { clock.now })
+        let creds = try credentials(clock: clock)
         let first = try creds.token()
         clock.advance(minutes: 49.9)
         #expect(try creds.token() == first)
@@ -242,8 +319,7 @@ struct PayloadTests {
 
     @Test func rejectedTokenIsReplacedOnlyAfterTwentyMinutes() throws {
         let clock = TestClock()
-        let creds = try APNSCredentials(keyID: keyID, teamID: teamID, key: P256.Signing.PrivateKey(),
-                                        now: { clock.now })
+        let creds = try credentials(clock: clock)
         let first = try creds.token()
         clock.advance(minutes: 5)
         #expect(creds.reject(first) == false)       // too soon to mint again
@@ -256,15 +332,27 @@ struct PayloadTests {
         #expect(try creds.token() == second)
     }
 
-    @Test func clockGoingBackwardsReplacesTheToken() throws {
+    @Test func wallClockStepsDontAffectTokenAge() throws {
         let clock = TestClock()
-        let creds = try APNSCredentials(keyID: keyID, teamID: teamID, key: P256.Signing.PrivateKey(),
-                                        now: { clock.now })
+        let creds = try credentials(clock: clock)
         let first = try creds.token()
-        clock.advance(minutes: -90)
-        let second = try creds.token()
-        #expect(second != first)
-        #expect(try creds.token() == second)
+        // Backwards steps (repeated, as a misbehaving VM clock might): no new mints.
+        for _ in 0..<20 { clock.stepWall(minutes: -1.1) }
+        #expect(try creds.token() == first)
+        clock.stepWall(minutes: -90)
+        #expect(try creds.token() == first)
+        // A forward wall step doesn't age the token either.
+        clock.stepWall(minutes: 600)
+        #expect(try creds.token() == first)
+        // Real (monotonic) time does.
+        clock.advance(minutes: 50)
+        #expect(try creds.token() != first)
+    }
+
+    @Test func monotonicClockIsMonotonic() {
+        let a = monotonicSeconds()
+        let b = monotonicSeconds()
+        #expect(a > 0 && b >= a)
     }
 
     // MARK: Redaction

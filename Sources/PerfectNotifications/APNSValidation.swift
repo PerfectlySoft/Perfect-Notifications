@@ -13,6 +13,10 @@ enum APNSValidation {
     /// `apns-collapse-id` must not exceed 64 bytes.
     static let maxCollapseIDBytes = 64
 
+    /// The deepest JSON nesting accepted in payloads (APNs payloads are a few levels deep;
+    /// the cap keeps recursive encoding and conversion off the end of the stack).
+    static let maxJSONDepth = 64
+
     /// Payload limits: 4 KB for regular pushes, 5 KB for VoIP.
     static func payloadLimit(for pushType: APNSPushType) -> Int {
         pushType == .voip ? 5120 : 4096
@@ -39,9 +43,12 @@ enum APNSValidation {
         }
     }
 
-    /// At most 64 bytes of UTF-8, with no C0/C1 control characters, DEL, or U+2028/U+2029.
+    /// 1–64 printable ASCII characters, `!` (0x21) through `~` (0x7E). Apple only documents
+    /// the 64-byte limit; spaces and non-ASCII are refused to stay on the safe side.
     static func collapseID(_ id: String) throws(APNSClientError) {
-        guard !id.isEmpty, id.utf8.count <= maxCollapseIDBytes, !containsControlCharacters(id) else {
+        let bytes = id.utf8
+        guard (1...maxCollapseIDBytes).contains(bytes.count),
+              bytes.allSatisfy({ (0x21...0x7E).contains($0) }) else {
             throw .invalidCollapseID
         }
     }
@@ -59,13 +66,6 @@ enum APNSValidation {
               !host.split(separator: ".", omittingEmptySubsequences: false).contains(where: \.isEmpty)
         else {
             throw .invalidHost
-        }
-    }
-
-    static func containsControlCharacters(_ s: String) -> Bool {
-        s.unicodeScalars.contains { scalar in
-            let v = scalar.value
-            return v < 0x20 || (0x7F...0x9F).contains(v) || v == 0x2028 || v == 0x2029
         }
     }
 

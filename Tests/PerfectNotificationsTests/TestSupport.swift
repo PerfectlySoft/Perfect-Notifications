@@ -12,6 +12,8 @@ import Crypto
 
 enum MockReply: Sendable {
     case respond(status: Int, headers: [String: String], body: Data)
+    /// A response that claims to come from another URL (another origin).
+    case respondFrom(url: String, status: Int)
     case fail(URLError.Code)
     /// Never answers (for timeout and cancellation tests).
     case hang
@@ -22,6 +24,7 @@ struct RecordedRequest: Sendable {
     let method: String?
     let headers: [String: String]
     let body: Data
+    var timeout: TimeInterval = 0
     func header(_ name: String) -> String? {
         headers.first { $0.key.lowercased() == name.lowercased() }?.value
     }
@@ -37,6 +40,7 @@ final class MockURLProtocol: URLProtocol {
     }
     static var requests: [RecordedRequest] { lock.withLock { _requests } }
     static var lastRequest: RecordedRequest? { requests.last }
+    static var lastTimeout: TimeInterval? { lastRequest?.timeout }
 
     static func session() -> URLSession {
         let config = URLSessionConfiguration.ephemeral
@@ -50,7 +54,8 @@ final class MockURLProtocol: URLProtocol {
     override func startLoading() {
         let recorded = RecordedRequest(url: request.url, method: request.httpMethod,
                                        headers: request.allHTTPHeaderFields ?? [:],
-                                       body: Self.readBody(from: request))
+                                       body: Self.readBody(from: request),
+                                       timeout: request.timeoutInterval)
         let (index, handler) = Self.lock.withLock { () -> (Int, (@Sendable (Int) -> MockReply)?) in
             Self._requests.append(recorded)
             return (Self._requests.count - 1, Self._handler)
@@ -61,6 +66,11 @@ final class MockURLProtocol: URLProtocol {
                                        httpVersion: "HTTP/2", headerFields: headers)!
             client?.urlProtocol(self, didReceive: http, cacheStoragePolicy: .notAllowed)
             client?.urlProtocol(self, didLoad: body)
+            client?.urlProtocolDidFinishLoading(self)
+        case .respondFrom(let url, let status):
+            let http = HTTPURLResponse(url: URL(string: url)!, statusCode: status,
+                                       httpVersion: "HTTP/2", headerFields: ["apns-id": "X"])!
+            client?.urlProtocol(self, didReceive: http, cacheStoragePolicy: .notAllowed)
             client?.urlProtocolDidFinishLoading(self)
         case .fail(let code):
             client?.urlProtocol(self, didFailWithError: URLError(code))
@@ -108,13 +118,21 @@ let token64 = String(repeating: "ab", count: 32)
 let keyID = "ABCDE12345"
 let teamID = "TEAM123456"
 
-/// A settable clock for token-age tests.
+/// A settable pair of clocks for token-age tests: wall time (for `iat`) and monotonic
+/// time (for token age). `advance` moves both; `stepWall` moves only the wall clock.
 final class TestClock: @unchecked Sendable {
     private let lock = NSLock()
-    private var current: Date
-    init(_ start: Date = Date(timeIntervalSince1970: 1_800_000_000)) { current = start }
-    var now: Date { lock.withLock { current } }
-    func advance(minutes: Double) { lock.withLock { current += minutes * 60 } }
+    private var wall: Date
+    private var mono: TimeInterval = 1_000
+    init(_ start: Date = Date(timeIntervalSince1970: 1_800_000_000)) { wall = start }
+    var now: Date { lock.withLock { wall } }
+    var uptime: TimeInterval { lock.withLock { mono } }
+    func advance(minutes: Double) { lock.withLock { wall += minutes * 60; mono += minutes * 60 } }
+    func stepWall(minutes: Double) { lock.withLock { wall += minutes * 60 } }
+}
+
+func credentials(_ key: P256.Signing.PrivateKey = P256.Signing.PrivateKey(), clock: TestClock) throws -> APNSCredentials {
+    try APNSCredentials(keyID: keyID, teamID: teamID, key: key, now: { clock.now }, uptime: { clock.uptime })
 }
 
 func makeClient(key: P256.Signing.PrivateKey = P256.Signing.PrivateKey(),
@@ -123,9 +141,8 @@ func makeClient(key: P256.Signing.PrivateKey = P256.Signing.PrivateKey(),
                 timeout: TimeInterval = APNSClient.defaultTimeout,
                 _ handler: @escaping @Sendable (Int) -> MockReply) throws -> APNSClient {
     MockURLProtocol.reset(handler)
-    let now: @Sendable () -> Date
-    if let clock { now = { clock.now } } else { now = { Date() } }
-    let creds = try APNSCredentials(keyID: keyID, teamID: teamID, key: key, now: now)
+    let creds = try clock.map { try credentials(key, clock: $0) }
+        ?? APNSCredentials(keyID: keyID, teamID: teamID, key: key)
     return try APNSClient(credentials: creds, environment: environment,
                           urlSession: MockURLProtocol.session(), timeout: timeout)
 }

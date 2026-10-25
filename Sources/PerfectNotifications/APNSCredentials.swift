@@ -7,22 +7,27 @@ import Foundation
 /// than once every 20 minutes (`TooManyProviderTokenUpdates`). So a token is reused for
 /// 50 minutes, is replaced early only after APNs rejected it, and is never replaced
 /// within 20 minutes of being minted.
+///
+/// Ages are measured on a monotonic clock that keeps counting while the machine sleeps
+/// (`CLOCK_MONOTONIC` on Darwin, `CLOCK_BOOTTIME` on Linux), so stepping the wall clock
+/// neither keeps an old token alive nor forces new ones. The wall clock is only used for
+/// the token's `iat` claim.
 final class APNSCredentials: @unchecked Sendable {
     /// Proactive refresh age, safely inside Apple's 60-minute limit.
     static let refreshAge: TimeInterval = 50 * 60
     /// Apple's minimum interval between token updates.
     static let minimumRefreshInterval: TimeInterval = 20 * 60
-    /// Backwards clock steps smaller than this are ignored.
-    static let clockStepTolerance: TimeInterval = 60
 
     let keyID: String
     let teamID: String
     private let privateKey: P256.Signing.PrivateKey
     private let now: @Sendable () -> Date
+    private let uptime: @Sendable () -> TimeInterval
 
     private let lock = NSLock()
     private var cachedToken: String?
-    private var issuedAt: Date = .distantPast
+    /// Monotonic time of the last mint.
+    private var mintedAt: TimeInterval = 0
     private var rejected = false
 
     // MARK: Init
@@ -40,12 +45,14 @@ final class APNSCredentials: @unchecked Sendable {
     }
 
     init(keyID: String, teamID: String, key: P256.Signing.PrivateKey,
-         now: @escaping @Sendable () -> Date = { Date() }) throws {
+         now: @escaping @Sendable () -> Date = { Date() },
+         uptime: @escaping @Sendable () -> TimeInterval = monotonicSeconds) throws {
         try Self.validate(keyID: keyID, teamID: teamID)
         self.keyID = keyID
         self.teamID = teamID
         self.privateKey = key
         self.now = now
+        self.uptime = uptime
     }
 
     private static func validate(keyID: String, teamID: String) throws(APNSClientError) {
@@ -59,18 +66,15 @@ final class APNSCredentials: @unchecked Sendable {
     /// or was rejected by APNs and is at least 20 minutes old.
     func token() throws -> String {
         try lock.withLock {
-            let current = now()
-            // A clearly negative age means the clock stepped backwards; the token's real
-            // age is unknown, so replace it rather than risk keeping an expired one.
+            let current = uptime()
             if let cached = cachedToken {
-                let age = current.timeIntervalSince(issuedAt)
-                let sane = age > -Self.clockStepTolerance
-                if sane && age < Self.minimumRefreshInterval { return cached }
-                if sane && age < Self.refreshAge && !rejected { return cached }
+                let age = current - mintedAt
+                if age < Self.minimumRefreshInterval { return cached }
+                if age < Self.refreshAge && !rejected { return cached }
             }
-            let token = try makeJWT(issuedAt: current)
+            let token = try makeJWT(issuedAt: now())
             cachedToken = token
-            issuedAt = current
+            mintedAt = current
             rejected = false
             return token
         }
@@ -84,8 +88,7 @@ final class APNSCredentials: @unchecked Sendable {
         lock.withLock {
             guard token == cachedToken else { return true }
             rejected = true
-            let age = now().timeIntervalSince(issuedAt)
-            return age <= -Self.clockStepTolerance || age >= Self.minimumRefreshInterval
+            return uptime() - mintedAt >= Self.minimumRefreshInterval
         }
     }
 
@@ -114,6 +117,19 @@ extension APNSCredentials: CustomStringConvertible, CustomDebugStringConvertible
         Mirror(self, children: ["keyID": keyID, "teamID": teamID, "key": "<redacted>"],
                displayStyle: .class)
     }
+}
+
+// MARK: - Monotonic clock
+
+/// Seconds on a clock that never steps and keeps counting through sleep.
+@Sendable func monotonicSeconds() -> TimeInterval {
+    var ts = timespec()
+    #if canImport(Darwin)
+    clock_gettime(CLOCK_MONOTONIC, &ts)
+    #else
+    clock_gettime(CLOCK_BOOTTIME, &ts)
+    #endif
+    return TimeInterval(ts.tv_sec) + TimeInterval(ts.tv_nsec) / 1_000_000_000
 }
 
 // MARK: - Base64URL (no padding, URL-safe alphabet)

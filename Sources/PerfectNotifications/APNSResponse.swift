@@ -83,10 +83,11 @@ public enum APNSErrorReason: String, Sendable, CaseIterable {
 }
 
 /// The per-token outcome of sending one notification to several device tokens.
-public struct APNSBatchResult: Sendable {
+public struct APNSBatchResult: Sendable, Equatable {
     public let deviceToken: String
     /// The APNs response (which may itself be a rejection), or the client error that
-    /// stopped this token's request: an invalid token, a network failure or a timeout.
+    /// stopped this token's request: an invalid token, a network failure, a timeout, or
+    /// ``APNSClientError/cancelled`` for tokens reached after the batch was cancelled.
     public let result: Result<APNSResponse, APNSClientError>
 }
 
