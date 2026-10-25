@@ -12,6 +12,8 @@ final class APNSCredentials: @unchecked Sendable {
     static let refreshAge: TimeInterval = 50 * 60
     /// Apple's minimum interval between token updates.
     static let minimumRefreshInterval: TimeInterval = 20 * 60
+    /// Backwards clock steps smaller than this are ignored.
+    static let clockStepTolerance: TimeInterval = 60
 
     let keyID: String
     let teamID: String
@@ -58,10 +60,13 @@ final class APNSCredentials: @unchecked Sendable {
     func token() throws -> String {
         try lock.withLock {
             let current = now()
+            // A clearly negative age means the clock stepped backwards; the token's real
+            // age is unknown, so replace it rather than risk keeping an expired one.
             if let cached = cachedToken {
                 let age = current.timeIntervalSince(issuedAt)
-                if age < Self.minimumRefreshInterval { return cached }
-                if age < Self.refreshAge && !rejected { return cached }
+                let sane = age > -Self.clockStepTolerance
+                if sane && age < Self.minimumRefreshInterval { return cached }
+                if sane && age < Self.refreshAge && !rejected { return cached }
             }
             let token = try makeJWT(issuedAt: current)
             cachedToken = token
@@ -79,7 +84,8 @@ final class APNSCredentials: @unchecked Sendable {
         lock.withLock {
             guard token == cachedToken else { return true }
             rejected = true
-            return now().timeIntervalSince(issuedAt) >= Self.minimumRefreshInterval
+            let age = now().timeIntervalSince(issuedAt)
+            return age <= -Self.clockStepTolerance || age >= Self.minimumRefreshInterval
         }
     }
 

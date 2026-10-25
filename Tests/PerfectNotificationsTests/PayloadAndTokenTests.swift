@@ -256,6 +256,17 @@ struct PayloadTests {
         #expect(try creds.token() == second)
     }
 
+    @Test func clockGoingBackwardsReplacesTheToken() throws {
+        let clock = TestClock()
+        let creds = try APNSCredentials(keyID: keyID, teamID: teamID, key: P256.Signing.PrivateKey(),
+                                        now: { clock.now })
+        let first = try creds.token()
+        clock.advance(minutes: -90)
+        let second = try creds.token()
+        #expect(second != first)
+        #expect(try creds.token() == second)
+    }
+
     // MARK: Redaction
 
     @Test func credentialsNeverPrintTheKey() throws {
