@@ -8,7 +8,7 @@ let package = Package(
         .library(name: "PerfectNotifications", targets: ["PerfectNotifications"])
     ],
     dependencies: [
-        .package(url: "https://github.com/apple/swift-crypto.git", from: "3.0.0")
+        .package(url: "https://github.com/apple/swift-crypto.git", "4.0.0"..<"5.0.0")
     ],
     targets: [
         .target(

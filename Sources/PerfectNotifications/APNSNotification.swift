@@ -1,11 +1,7 @@
 import Foundation
 
 /// Items that compose the `aps` dictionary and top-level custom keys of a push payload.
-///
-/// - Note: `@unchecked Sendable` because ``customPayload(_:_:)`` accepts `Any` for
-///   JSON flexibility. In practice only JSON-compatible types (String, Int, Double,
-///   Bool, [String: Any], [Any]) should be used.
-public enum APNSNotificationItem: @unchecked Sendable {
+public enum APNSNotificationItem: Sendable, Equatable {
     // MARK: Alert
     /// Main body text of the alert banner.
     case alertBody(String)
@@ -43,8 +39,11 @@ public enum APNSNotificationItem: @unchecked Sendable {
     case relevanceScore(Double)
 
     // MARK: Custom
-    /// A top-level JSON key/value pair outside the `aps` dictionary.
-    case customPayload(String, Any)
+    /// A top-level JSON key/value pair outside the `aps` dictionary. The key `aps` is
+    /// reserved and makes ``APNSNotification/init(items:)`` throw.
+    ///
+    /// Literals work directly: `.customPayload("orderId", "ORD-123")`, `.customPayload("n", 49)`.
+    case customPayload(String, APNSJSONValue)
 
     public enum InterruptionLevel: String, Sendable {
         case passive
@@ -55,16 +54,38 @@ public enum APNSNotificationItem: @unchecked Sendable {
 }
 
 /// A push notification payload ready to send.
-public struct APNSNotification: Sendable {
-    let payload: Data
+///
+/// The size limit (4096 bytes, or 5120 for VoIP) depends on the push type, so it is
+/// checked when the notification is sent.
+public struct APNSNotification: Sendable, Equatable {
+    /// The encoded JSON payload.
+    public let payload: Data
 
     /// Build from notification items (recommended for standard alerts).
+    ///
+    /// - Throws: ``APNSClientError/reservedPayloadKey(_:)`` for a custom `aps` key,
+    ///   ``APNSClientError/invalidPayload(_:)`` for a negative badge or a relevance score
+    ///   outside 0–1, ``APNSClientError/jsonNestingTooDeep(limit:)`` for custom values nested
+    ///   past 64 levels, or an `EncodingError` for a non-finite number.
     public init(items: [APNSNotificationItem]) throws {
         self.payload = try APNSNotificationItem.encodePayload(items)
     }
 
-    /// Supply a raw pre-encoded JSON payload.
-    public init(raw: Data) {
+    /// Supply a raw pre-encoded JSON payload, sent as is.
+    ///
+    /// - Throws: ``APNSClientError/invalidPayload(_:)`` unless the bytes are a JSON object
+    ///   with an `aps` dictionary, ``APNSClientError/payloadTooLarge(size:limit:)`` past
+    ///   5120 bytes (the largest limit; the push type's limit is checked when sending), or
+    ///   ``APNSClientError/jsonNestingTooDeep(limit:)``.
+    public init(raw: Data) throws {
+        guard raw.count <= 5120 else { throw APNSClientError.payloadTooLarge(size: raw.count, limit: 5120) }
+        guard let value = try? JSONDecoder().decode(APNSJSONValue.self, from: raw),
+              case .object(let top) = value, case .object? = top["aps"] else {
+            throw APNSClientError.invalidPayload("raw payload must be a JSON object with an \"aps\" dictionary")
+        }
+        guard value.depth <= APNSValidation.maxJSONDepth else {
+            throw APNSClientError.jsonNestingTooDeep(limit: APNSValidation.maxJSONDepth)
+        }
         self.payload = raw
     }
 
@@ -78,50 +99,57 @@ public struct APNSNotification: Sendable {
 
 extension APNSNotificationItem {
     static func encodePayload(_ items: [APNSNotificationItem]) throws -> Data {
-        var top   = [String: Any]()
-        var aps   = [String: Any]()
-        var alert = [String: Any]()
+        var top   = [String: APNSJSONValue]()
+        var aps   = [String: APNSJSONValue]()
+        var alert = [String: APNSJSONValue]()
         var alertBody: String?
-        var hasAlertDict = false
 
         for item in items {
             switch item {
-            case .alertBody(let s):   alertBody = s
-            case .alertTitle(let s):  alert["title"] = s;       hasAlertDict = true
-            case .alertSubtitle(let s): alert["subtitle"] = s;  hasAlertDict = true
+            case .alertBody(let s):        alertBody = s
+            case .alertTitle(let s):       alert["title"] = .string(s)
+            case .alertSubtitle(let s):    alert["subtitle"] = .string(s)
             case .alertTitleLoc(let s, let a):
-                alert["title-loc-key"] = s
-                if let args = a { alert["title-loc-args"] = args }
-                hasAlertDict = true
-            case .alertActionLoc(let s):
-                alert["action-loc-key"] = s;                    hasAlertDict = true
+                alert["title-loc-key"] = .string(s)
+                if let args = a { alert["title-loc-args"] = .array(args.map(APNSJSONValue.string)) }
+            case .alertActionLoc(let s):   alert["action-loc-key"] = .string(s)
             case .alertLoc(let s, let a):
-                alert["loc-key"] = s
-                if let args = a { alert["loc-args"] = args }
-                hasAlertDict = true
-            case .alertLaunchImage(let s):
-                alert["launch-image"] = s;                      hasAlertDict = true
-            case .badge(let i):          aps["badge"] = i
-            case .sound(let s):          aps["sound"] = s
-            case .contentAvailable:      aps["content-available"] = 1
-            case .mutableContent:        aps["mutable-content"] = 1
-            case .category(let s):       aps["category"] = s
-            case .threadId(let s):       aps["thread-id"] = s
-            case .targetContentId(let s):aps["target-content-id"] = s
-            case .interruptionLevel(let l): aps["interruption-level"] = l.rawValue
-            case .relevanceScore(let d): aps["relevance-score"] = d
-            case .customPayload(let k, let v): top[k] = v
+                alert["loc-key"] = .string(s)
+                if let args = a { alert["loc-args"] = .array(args.map(APNSJSONValue.string)) }
+            case .alertLaunchImage(let s): alert["launch-image"] = .string(s)
+            case .badge(let i):
+                guard i >= 0 else { throw APNSClientError.invalidPayload("badge must not be negative") }
+                aps["badge"] = .int(i)
+            case .sound(let s):            aps["sound"] = .string(s)
+            case .contentAvailable:        aps["content-available"] = 1
+            case .mutableContent:          aps["mutable-content"] = 1
+            case .category(let s):         aps["category"] = .string(s)
+            case .threadId(let s):         aps["thread-id"] = .string(s)
+            case .targetContentId(let s):  aps["target-content-id"] = .string(s)
+            case .interruptionLevel(let l): aps["interruption-level"] = .string(l.rawValue)
+            case .relevanceScore(let d):
+                guard (0...1).contains(d) else { throw APNSClientError.invalidPayload("relevanceScore must be 0-1") }
+                aps["relevance-score"] = .double(d)
+            case .customPayload(let k, let v):
+                guard k != "aps" else { throw APNSClientError.reservedPayloadKey(k) }
+                // The value sits one level below the top-level object.
+                guard v.depth < APNSValidation.maxJSONDepth else {
+                    throw APNSClientError.jsonNestingTooDeep(limit: APNSValidation.maxJSONDepth)
+                }
+                top[k] = v
             }
         }
 
         if let body = alertBody {
-            if hasAlertDict { alert["body"] = body; aps["alert"] = alert }
-            else             { aps["alert"] = body }
-        } else if hasAlertDict {
-            aps["alert"] = alert
+            if alert.isEmpty { aps["alert"] = .string(body) }
+            else { alert["body"] = .string(body); aps["alert"] = .object(alert) }
+        } else if !alert.isEmpty {
+            aps["alert"] = .object(alert)
         }
 
-        top["aps"] = aps
-        return try JSONSerialization.data(withJSONObject: top)
+        top["aps"] = .object(aps)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+        return try encoder.encode(top)
     }
 }

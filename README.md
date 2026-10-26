@@ -1,252 +1,290 @@
 # Perfect-Notifications
 
 <p align="center">
-    <img src="https://img.shields.io/badge/Swift-6.2-orange.svg?style=flat" alt="Swift 6.2">
-    <img src="https://img.shields.io/badge/Platforms-macOS%2012%2B-lightgray.svg?style=flat" alt="Platforms macOS 12+">
+    <img src="https://img.shields.io/badge/Swift-6.2%2B-orange.svg?style=flat" alt="Swift 6.2+">
+    <img src="https://img.shields.io/badge/Platforms-macOS%2012%2B%20%7C%20Linux-lightgray.svg?style=flat" alt="Platforms macOS 12+ | Linux">
     <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache-lightgrey.svg?style=flat" alt="License Apache"></a>
 </p>
 
-APNs remote Notifications for Perfect. This package adds push notification support to your server. Send notifications to iOS/macOS devices.
+An Apple Push Notification service (APNs) provider client for Swift servers. It sends
+notifications over the APNs HTTP/2 provider API with token-based (`.p8` key, ES256 JWT)
+authentication, using Foundation's `URLSession`. The only dependency is
+[apple/swift-crypto](https://github.com/apple/swift-crypto), for the JWT signature.
 
-**A from-scratch Swift 6 rewrite** of the original package. The public API (`APNSClient`) is a
-completely different, modern async/await surface — it does not use the original
-`NotificationPusher` class. No dependency on NIO, PerfectHTTP, or any other package here —
-networking runs over Foundation's `URLSession` async API, with
-[apple/swift-crypto](https://github.com/apple/swift-crypto) as the only external dependency, used
-to sign ES256 APNs provider JWTs.
+6.0.0 is a Swift 6 rewrite with a new async API. The 5.x code (`NotificationPusher`, on
+Perfect-Net) is on the [`legacy`](../../tree/legacy) branch; see [Migrating from 5.x](#migrating-from-5x).
 
-The pre-Swift-6 version of this package is preserved on the [`legacy`](../../tree/legacy) branch.
+## Installation
 
-Building
---------
+```swift
+.package(url: "https://github.com/PerfectlySoft/Perfect-Notifications.git", from: "6.0.0"),
+```
 
-This is a Swift Package Manager based project targeting **Swift 6.2** (strict concurrency /
-`.swiftLanguageMode(.v6)`), macOS 12+. No other platform is currently declared in `Package.swift`
-(Linux support has not been verified).
+and add `.product(name: "PerfectNotifications", package: "Perfect-Notifications")` to your target.
 
-Add this repository as a dependency in your `Package.swift` file:
+## Requirements
 
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-.package(url: "https://github.com/PerfectlySoft/Perfect-Notifications.git", branch: "main")
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+- Swift 6.2 or later (`swift-tools-version: 6.2`, Swift 6 language mode).
+- macOS 12 or later, or Linux. CI covers Swift 6.2 and 6.4 on Ubuntu 24.04 and Xcode 26.0.1
+  and 26.6 on macOS, debug and release, with warnings as errors.
+- On Linux, `URLSession` comes from `FoundationNetworking`, which uses the system libcurl.
+  APNs needs HTTP/2, so libcurl must be built with nghttp2. Ubuntu's `libcurl4` is, and the
+  official `swift:*-noble` images have it.
+- swift-crypto `4.0.0..<5.0.0`.
 
-Overview
---------
+iOS, tvOS and watchOS aren't supported targets: a provider runs on a server, and must not ship
+its signing key inside an app.
 
-This system runs on the server side. Typically at app launch, an Apple device will register with Apple's system for remote notifications. Doing so will return to the device an ID which can be used by external systems to address the device and send notifications through APNs.
-
-When the device obtains its ID it will need to transmit it to **your** server. Your server will store this id and use it when sending notifications to one or more devices through APNs.
-
-The client itself, `APNSClient`, is a `Sendable` struct with `async throws` send methods — there is no callback-based API and no separate "configuration registry" step; you construct one client per set of APNs credentials and call `send`/`sendAlert`/`sendBackground` directly.
-
-Obtain APNs Auth Key
---------
-
-To connect your server to Apple's push notification system you will first need to obtain an "APNs Auth Key". This key is used on your server to configure its APNs access. You can generate this key through your Apple developer account portal. Log in to your developer account and choose "Certificates, IDs &amp; Profiles" from the menu. Then, under "Keys", choose "All".
-
-If you haven't already created and downloaded the auth key, click "+" to create a new one. Enter a name for the key and make sure you select **Apple Push Notifications service (APNs)**. This one key can be used for both development or production and can be used for any of your iOS/macOS apps.
-
-Click "Continue", then "Confirm", then you will be given a chance to download the **private key**. You must download this key now and **save the file**. Also copy the "Key ID" shown in the same view. This will be a 10 character string.
-
-Finally you will need to locate your developer team id. Click "Account" near the window's top. Select "Membership" in the menu. You will then be shown much of your personal information, including "Team ID". This is another 10 character string. Copy this value.
-
-Server Configuration
-------
-
-To send notifications from your server your must have four pieces of information:
-
-1. The private key (`.p8`) file which was downloaded, or its PEM contents
-2. The 10 character key id
-3. Your 10 character team id
-4. An iOS/macOS app id ("topic")
-
-Unlike the original Perfect-era API, there is no separate "add a named configuration, then look it up later" step — you construct an `APNSClient` directly with the key material, and it internally mints and caches (auto-rotating every 55 minutes, before Apple's 60-minute expiry) the ES256 JWT provider token via `APNSCredentials` and swift-crypto.
+## Quick start
 
 ```swift
 import PerfectNotifications
 
-let apnsKeyIdentifier  = "AB90CD56XY"
-let apnsTeamIdentifier = "YX65DC09BA"
-let apnsPrivateKeyFilePath = "./APNsAuthKey_AB90CD56XY.p8"
-let topic = "my.app.id"
-
 let client = try APNSClient(
-    keyID: apnsKeyIdentifier,
-    teamID: apnsTeamIdentifier,
-    privateKeyPath: apnsPrivateKeyFilePath,
-    environment: .sandbox // .production for release builds
+    keyID: "ABCDE12345",                       // from the .p8 file name
+    teamID: "TEAM123456",                      // Apple Developer → Membership
+    privateKeyPath: "/etc/myapp/AuthKey_ABCDE12345.p8",
+    environment: .sandbox                      // .production for App Store / TestFlight builds
 )
 
 let notification = try APNSNotification(items: [
-    .alertTitle("Hello!"),
-    .sound("default")
+    .alertTitle("Order ready"),
+    .alertBody("Your order is ready for pickup."),
+    .sound("default"),
+    .badge(1),
+    .customPayload("orderID", "ORD-123"),
 ])
 
-let response = try await client.send(notification, to: deviceToken, topic: topic)
+let response = try await client.send(notification,
+                                     to: deviceToken,          // hex string from the device
+                                     topic: "com.example.App") // your bundle ID
 if response.isSuccess {
-    print("sent — apns-id: \(response.apnsID ?? "?")")
-} else if let err = response.error {
-    print("rejected: \(err.reason)")
-}
-```
-
-`APNSCredentials` can also be supplied a PEM string directly (`APNSClient(keyID:teamID:pemString:environment:)`) instead of a file path — useful when the key is loaded from an environment variable or secrets store.
-
-Public API
-----
-
-The full public API surface follows:
-
-```swift
-public struct APNSClient: Sendable {
-    public enum Environment: Sendable { case sandbox, production }
-
-    /// Load the signing key from a `.p8` file on disk.
-    public init(keyID: String, teamID: String, privateKeyPath: String,
-                environment: Environment = .sandbox,
-                urlSession: URLSession = .shared) throws
-
-    /// Supply the `.p8` key as a PEM string.
-    public init(keyID: String, teamID: String, pemString: String,
-                environment: Environment = .sandbox,
-                urlSession: URLSession = .shared) throws
-
-    /// Send a notification to a single device token.
-    public func send(
-        _ notification: APNSNotification,
-        to deviceToken: String,
-        topic: String,
-        pushType: APNSPushType = .alert,
-        priority: Int? = nil,
-        expiration: APNSExpiration? = nil,
-        collapseID: String? = nil
-    ) async throws -> APNSResponse
-
-    /// Send the same notification to multiple device tokens (sequential).
-    public func send(
-        _ notification: APNSNotification,
-        to deviceTokens: [String],
-        topic: String,
-        pushType: APNSPushType = .alert,
-        priority: Int? = nil,
-        expiration: APNSExpiration? = nil,
-        collapseID: String? = nil
-    ) async throws -> [APNSResponse]
-
-    /// Build and send a simple alert in one call.
-    @discardableResult
-    public func sendAlert(
-        to deviceToken: String,
-        topic: String,
-        title: String,
-        body: String? = nil,
-        subtitle: String? = nil,
-        badge: Int? = nil,
-        sound: String? = nil,
-        category: String? = nil,
-        threadId: String? = nil,
-        interruptionLevel: APNSNotificationItem.InterruptionLevel? = nil,
-        collapseID: String? = nil,
-        mutableContent: Bool = false
-    ) async throws -> APNSResponse
-
-    /// Send a silent background push (`content-available: 1`, priority 5).
-    @discardableResult
-    public func sendBackground(
-        to deviceToken: String,
-        topic: String,
-        customData: [APNSNotificationItem] = []
-    ) async throws -> APNSResponse
-}
-```
-
-The remaining structures, including `APNSNotificationItem`, follow:
-
-```swift
-/// Items that compose the `aps` dictionary and top-level custom keys of a push payload.
-/// `@unchecked Sendable` because `.customPayload` accepts `Any` for JSON flexibility.
-public enum APNSNotificationItem: @unchecked Sendable {
-    case alertBody(String)
-    case alertTitle(String)
-    case alertSubtitle(String)
-    case alertTitleLoc(String, [String]?)
-    case alertActionLoc(String)
-    case alertLoc(String, [String]?)
-    case alertLaunchImage(String)
-    case badge(Int)
-    case sound(String)
-    case contentAvailable
-    case mutableContent
-    case category(String)
-    case threadId(String)
-    case targetContentId(String)
-    case interruptionLevel(InterruptionLevel)
-    case relevanceScore(Double)
-    case customPayload(String, Any)
-
-    public enum InterruptionLevel: String, Sendable {
-        case passive, active
-        case timeSensitive = "time-sensitive"
-        case critical
+    print("sent, apns-id \(response.apnsID ?? "?")")
+} else if let error = response.error {
+    switch error.knownReason {
+    case .unregistered?, .badDeviceToken?:
+        // Stop sending to this token.
+        print("drop token (invalid since \(error.invalidatedAt.map { "\($0)" } ?? "?"))")
+    default:
+        print("rejected: \(error.reason)")
     }
 }
+```
 
-/// A push notification payload ready to send.
-public struct APNSNotification: Sendable {
-    public init(items: [APNSNotificationItem]) throws
-    /// Supply a raw pre-encoded JSON payload.
-    public init(raw: Data)
-    /// Encode an `Encodable` value as the entire payload (must include the `aps` key).
-    public init<T: Encodable & Sendable>(encodable: T) throws
-}
+Create one client per signing key and keep it: `URLSession` keeps the HTTP/2 connection to APNs
+open and multiplexes concurrent sends over it, as Apple asks. `APNSClient` is a `Sendable`
+struct, so it can be shared across tasks; copies share the cached provider token.
 
-/// The type of push notification being sent (required by APNs since iOS 13).
-public enum APNSPushType: String, Sendable, CaseIterable {
-    case alert, background, voip, complication
-    case fileProvider = "fileprovider"
-    case mdm, location
-    case liveActivity = "liveactivity"
-    case pushToTalk    = "pushtotalk"
+`APNSClient(keyID:teamID:pemString:)` takes the key's PEM text instead of a path, for keys
+loaded from a secrets store.
 
-    /// Background must use priority 5; all others default to 10.
-    public var defaultPriority: Int
-}
+### Getting the key
 
-public enum APNSPriority: Int, Sendable {
-    case immediate  = 10
-    case background = 5
-}
+In the Apple Developer portal, under Certificates, IDs & Profiles → Keys, create a key with
+**Apple Push Notifications service (APNs)** enabled and download the `.p8` file (it can only be
+downloaded once). The 10-character key ID is shown with the key, and the 10-character team ID is
+under Membership. One key works for every app in the team, in both environments.
 
-/// When to discard an undeliverable notification.
-public enum APNSExpiration: Sendable {
-    case immediate
-    case relative(Int)
-    case absolute(Int)
-}
+## Sending
 
-/// The outcome of a single APNs send request.
-public struct APNSResponse: Sendable {
-    public let statusCode: Int
-    public let apnsID: String?
-    public let error: APNSResponseError?
-    public var isSuccess: Bool { statusCode == 200 }
-}
+```swift
+func send(_ notification: APNSNotification, to deviceToken: String, topic: String,
+          pushType: APNSPushType = .alert, priority: APNSPriority? = nil,
+          expiration: APNSExpiration? = nil, collapseID: String? = nil) async throws -> APNSResponse
+```
 
-/// An error reason returned by the APNs gateway (e.g. BadDeviceToken, Unregistered, ExpiredProviderToken).
-public struct APNSResponseError: Sendable, Equatable, CustomStringConvertible {
-    public let reason: String
-    public let timestamp: Int?
+- **Push type** (`apns-push-type`): `.alert`, `.background`, `.voip`, `.complication`,
+  `.fileProvider`, `.mdm`, `.location`, `.liveActivity`, `.pushToTalk`. Several need a topic
+  suffix: `com.example.App.voip`, `.complication`, `.pushkit.fileprovider`,
+  `.push-type.liveactivity`, `.location-query`, `.voip-ptt`.
+- **Priority** (`apns-priority`): `.immediate` (10, the default), `.background` (5: delivery
+  that respects the device's power state) and `.low` (1: never wakes the device). Background
+  pushes must use `.background`, which is their default.
+- **Expiration** (`apns-expiration`): `.immediate` (deliver once or drop), `.relative(seconds)`
+  or `.absolute(epochSeconds)`.
+- **Collapse ID** (`apns-collapse-id`): 1–64 printable ASCII characters (`!` to `~`, no
+  spaces); newer notifications with the same ID replace older ones on the device.
+- `sendAlert(to:topic:title:body:...)` and `sendBackground(to:topic:customData:)` cover the
+  common cases.
+
+### Payloads
+
+`APNSNotificationItem` builds the `aps` dictionary (`.alertTitle`, `.alertBody`,
+`.alertSubtitle`, the `-loc` keys, `.badge`, `.sound`, `.contentAvailable`, `.mutableContent`,
+`.category`, `.threadId`, `.targetContentId`, `.interruptionLevel`, `.relevanceScore`) and
+custom top-level keys with `.customPayload(key, value)`.
+
+Custom values are `APNSJSONValue`, a `Sendable` JSON enum. Literals convert directly:
+
+```swift
+.customPayload("orderID", "ORD-123")
+.customPayload("amount", 49)
+.customPayload("flags", ["new": true, "ids": [1, 2, 3]])
+.customPayload("orderID", .string(order.id))           // a variable: name the case
+.customPayload("legacy", try APNSJSONValue(jsonObject: someAnyDictionary))
+```
+
+`APNSNotification(raw:)` sends JSON bytes as is, once it has checked that they are a JSON object
+with an `aps` dictionary, and `APNSNotification(encodable:)` encodes your own `Encodable` payload
+(it must contain `aps`). The payload limit is checked before sending: 4096 bytes, or 5120 for
+VoIP. `badge` must not be negative, `relevanceScore` must be 0–1, and JSON may nest at most 64
+levels.
+
+### Several devices
+
+```swift
+let results = try await client.send(notification, to: tokens, topic: "com.example.App")
+for r in results {
+    switch r.result {
+    case .success(let response) where response.isSuccess: break
+    case .success(let response): print(r.deviceToken, "rejected:", response.error?.reason ?? "\(response.statusCode)")
+    case .failure(let error):    print(r.deviceToken, "not sent:", error)
+    }
 }
 ```
 
-Additional Notes
-----
+Tokens are sent one after another. Each gets its own result: a bad token or a network error
+for one token doesn't stop the rest. Problems shared by every token (topic, priority, payload
+size) throw before anything is sent. Cancelling the calling task stops the batch without losing
+what was sent: earlier tokens keep their results, and the token in flight and the rest get
+`.failure(.cancelled)` (the one in flight may still have been delivered). For concurrency, call
+`send(_:to:topic:)` from a task group; the requests share one HTTP/2 connection.
 
-APNs requests are made from your server to Apple's servers `api.sandbox.push.apple.com` (development) or `api.push.apple.com` (production) on port 443, via `URLSession`'s async `data(for:)`. `URLSession` handles HTTP/2 connection reuse internally, in accordance with Apple's recommended usage of APNs.
+### Responses and errors
 
-The package targets **Swift 6.2 with strict concurrency** enabled (`.swiftLanguageMode(.v6)` on both the library and test targets). `APNSClient`, `APNSNotification`, `APNSPushType`, `APNSResponse`, and `APNSResponseError` are plain `Sendable`; `APNSCredentials` and `APNSNotificationItem` are `@unchecked Sendable` (an `NSLock`-guarded JWT cache and an `Any`-typed payload case, respectively). No actors are used — `APNSCredentials` synchronizes its cached-token state with `NSLock`.
+An APNs rejection is not a Swift error: it's an `APNSResponse` with `statusCode` and
+`error.reason` (`"BadDeviceToken"`, `"Unregistered"`, …; `error.knownReason` maps it onto
+`APNSErrorReason`). For HTTP 410, `error.timestamp` is when APNs last confirmed the token was
+invalid, in **milliseconds** since the epoch, and `error.invalidatedAt` is the same as a `Date`.
+`apnsID` and, in the sandbox, `apnsUniqueID` come from the response headers.
 
-The `Perfect-NotificationsExample` project linked from the original PerfectlySoft repo targets the legacy callback-based `NotificationPusher` API and is **not** compatible with this fork's `APNSClient`; treat it as historical reference only, not a working example for this package.
+`APNSClientError` is thrown for everything the client catches itself: invalid input (device
+token, topic, collapse ID, priority, expiration, key or team ID, payload size), `.timedOut`,
+`.responseTooLarge`, `.unexpectedRedirect`, `.network(...)`. Cancelling the calling task throws
+`CancellationError` promptly.
 
-## Further Information
-For more information on the Perfect project, please visit [perfect.org](http://perfect.org).
+### Provider tokens
+
+The client signs a JWT with your key and reuses it for 50 minutes (Apple accepts one for up to
+60). Apple refuses token updates more often than once every 20 minutes
+(`TooManyProviderTokenUpdates`), so the client never mints a new token sooner than that.
+After an `ExpiredProviderToken` rejection, it mints a new token and retries once if the old one is
+at least 20 minutes old. After `InvalidProviderToken` it doesn't retry (a new token from the same
+key won't help) but stops reusing the rejected token once 20 minutes have passed. Token age is
+measured on a monotonic clock that counts sleep, so stepping the wall clock doesn't change when
+tokens are replaced. Each
+`APNSClient` created from a key has its own token, so share one client rather than creating many
+for the same key.
+
+### Timeouts
+
+`APNSClient(..., timeout: 30)` sets a whole-request deadline in seconds (default 30, fractions
+allowed), covering connect, send and response. Past it, `send` throws `APNSClientError.timedOut`.
+
+### The `urlSession:` parameter
+
+The client sends through its own `URLSession`, built from the configuration of the session you
+pass (protocol classes, proxies, TLS settings and timeouts carry over), with its own delegate. It
+forwards authentication challenges, including server-trust evaluation for certificate pinning,
+to your session's delegate. Other delegate callbacks aren't forwarded. It needs its own delegate
+to refuse redirects and to cancel requests safely on Linux.
+
+## Security notes
+
+- **Inputs are validated before a request is built.** Device tokens must be 64–200 hex digits of
+  even length, so a token can't add path segments, a query or a fragment (`../`, `?`, `#`).
+  Topics must be bundle-ID syntax; collapse IDs are 1–64 printable ASCII characters; key and
+  team IDs must be 10 ASCII letters or digits. No header value can contain CR, LF, a space or
+  another control character. The JWT is built with `JSONEncoder`.
+- **Redirects are never followed.** APNs doesn't redirect, and following one would send the
+  provider token to another origin. A 3xx response, or one for another host, throws
+  `APNSClientError.unexpectedRedirect` instead of counting as a result.
+- **Secrets stay out of logs.** `"\(client)"`, `String(reflecting:)`, `dump(client)` and `Mirror`
+  show the environment, key ID, team ID and timeout, but never the private key or the provider
+  token. `APNSClientError.network` carries the transport error's description, which never
+  includes request headers.
+- **Response bodies are capped at 16 KiB** (APNs sends a few dozen bytes). The cap is enforced as
+  data arrives, and the request is cancelled when it passes it. On macOS that stops the
+  transfer. On Linux it doesn't; see below.
+- **Keep the `.p8` key out of source control**, and readable only by the server's user.
+- `Environment.custom(host:port:)` points the client at a mock APNs server for staging or tests.
+  The provider token is sent there, so only use a host you control.
+
+## Linux
+
+Verified on swift:6.2-noble and swift:6.4-noble, arm64 and x86_64: `URLSession` negotiates HTTP/2
+with ALPN `h2` against an HTTP/2-only server, reuses one connection, and multiplexes 20
+concurrent sends over it. Three corelibs Foundation behaviours to know about:
+
+- **An endless response body keeps downloading after the client gives up.** The client counts
+  the body as it arrives, throws `responseTooLarge` past 16 KiB, and discards anything later.
+  But corelibs keeps the transfer running after its task is cancelled. Against a local server
+  streaming an endless body, `send` threw within 0.14 s and memory stayed under 110 MB in 8 of
+  8 runs. corelibs went on reading 0.2–2.7 GB, though, before the connection closed, wasting
+  bandwidth and CPU. (Before 6.0.0's final transport, the same server got the process
+  OOM-killed at about 6 GB within roughly 10 seconds, because `URLSession.data(for:)` buffered
+  everything.) Reaching this needs a server that passes TLS verification for
+  `api.push.apple.com` (or your custom host). A SwiftNIO HTTP/2 transport that resets the
+  stream at the cap is planned for 6.1.
+- **Timeouts don't cost the connection.** A timed-out or cancelled request is reset on its own;
+  requests multiplexed alongside it complete, and later ones reuse the connection (150
+  timeouts in a row used 2 connections).
+- **Cancellation is never done under a lock, and never races a callback.** Cancelling a
+  corelibs task while it completes could deadlock the Swift concurrency pool (the client used
+  to do exactly that). Answering a redirect callback after the task was cancelled crashes the
+  process. The client resumes your task first, cancels the transfer on a Dispatch thread, and
+  holds a cancel back until a pending redirect has been refused.
+
+## Testing
+
+The test suite is hermetic: requests go to a `URLProtocol` stub that records them (path,
+headers, body, JWT signature checked with swift-crypto) and returns scripted responses. Nothing
+contacts APNs. To test your own code, pass a `URLSession` whose configuration's `protocolClasses`
+includes such a stub, or point `Environment.custom(host:port:)` at a local mock server.
+
+The URLProtocol stub can't reproduce corelibs' real network timing, so the Linux deadlock,
+timeout, redirect and endless-body regressions are covered by scripted probes outside the
+package: a SwiftNIO HTTP/2-only server with adversarial behaviours (never answering, a 1 MiB
+header, 5,000 headers, a cross-origin 307, a trickled or endless body) and a client that runs
+the poison sequence, sub-second timeouts, hang bursts, and a race that cancels every one of
+1,000 sends while it is being redirected. Release verification runs them on
+Swift 6.2 and 6.4, arm64 and x86_64, in containers with no network.
+
+## Migrating from 5.x
+
+5.x registered named configurations on `NotificationPusher` and delivered results to callbacks.
+6.0 has one `APNSClient` per key and `async` sends.
+
+| 5.x | 6.0 |
+|---|---|
+| `NotificationPusher.addConfigurationAPNS(name:production:keyId:teamId:privateKeyPath:)` | `let client = try APNSClient(keyID:teamID:privateKeyPath:environment:)` with `.sandbox` or `.production` |
+| `NotificationPusher(apnsTopic:expiration:priority:collapseId:)` | `topic:`, `expiration:`, `priority:`, `collapseID:` parameters of `send` |
+| `pushAPNS(configurationName:deviceToken:notificationItems:callback:)` | `try await client.send(APNSNotification(items: ...), to: token, topic: ...)` |
+| `pushAPNS(configurationName:deviceTokens:notificationItems:callback:)` | `try await client.send(..., to: tokens, topic: ...)` → `[APNSBatchResult]` |
+| `NotificationResponse` (`status`, `body`) | `APNSResponse` (`statusCode`, `apnsID`, `apnsUniqueID`, `error`) |
+| `.customPayload(String, Any)` | `.customPayload(String, APNSJSONValue)`: literals work as before; wrap variables (`.string(x)`) or use `APNSJSONValue(jsonObject:)` |
+| Perfect-Net / Perfect-Thread | `URLSession` and swift-crypto |
+
+`APNSNotificationItem`'s other cases keep their names. New: `.alertSubtitle`, `.mutableContent`,
+`.targetContentId`, `.interruptionLevel`, `.relevanceScore`.
+
+### From the pre-release `main` (Swift 6 rewrite before 6.0.0)
+
+- `priority:` is an `APNSPriority?` (`.immediate`, `.background`, `.low`) instead of an `Int?`,
+  and `APNSPushType.defaultPriority` returns an `APNSPriority`. A background push with any other
+  priority throws `.invalidPriority`.
+- `.customPayload` takes an `APNSJSONValue`, and `APNSNotificationItem` is properly `Sendable`
+  (and `Equatable`). A custom `aps` key throws `.reservedPayloadKey`.
+- The multi-token `send` returns `[APNSBatchResult]` (token plus `Result`) instead of
+  `[APNSResponse]`, and no longer throws away every result when one token fails.
+- `APNSResponseError.timestamp` is an `Int64?` of milliseconds (it was documented as seconds).
+- Key IDs and team IDs must be 10 letters or digits; device tokens, topics, collapse IDs and
+  expirations are validated; payloads over the limit throw `.payloadTooLarge`.
+- `APNSClientError` has new cases (exhaustive `switch`es need updating), and the `init`s take a
+  `timeout:`. `APNSExpiration` is `Equatable`, `APNSNotification.payload` is public.
+- `APNSNotification(raw:)` throws: the bytes must be a JSON object with an `aps` dictionary, at
+  most 5120 bytes. Collapse IDs must be printable ASCII without spaces.
+- The client sends through its own session built from the one you pass; only authentication
+  challenges reach your session's delegate.
+- swift-crypto is `4.0.0..<5.0.0` (was `from: "3.0.0"`, which meant 3.x only and couldn't
+  resolve next to Perfect-SMTP 6).

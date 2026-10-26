@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    name: Linux (Swift ${{ matrix.swift }}, ${{ matrix.configuration }})
+    runs-on: ubuntu-24.04
+    container: swift:${{ matrix.swift }}-noble
+    timeout-minutes: 30
+    env:
+      # Swift's backtracer adds minutes to a crashing test run in a container.
+      SWIFT_BACKTRACE: enable=no
+    strategy:
+      fail-fast: false
+      matrix:
+        # The oldest supported Swift (swift-tools-version 6.2) and the newest.
+        swift: ["6.2", "6.4"]
+        configuration: [debug, release]
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Toolchain
+        run: swift --version
+
+      - name: Build (warnings are errors)
+        run: |
+          flags="-c ${{ matrix.configuration }} -Xswiftc -warnings-as-errors"
+          # @testable imports need testing enabled in an optimized build.
+          [ "${{ matrix.configuration }}" = release ] && flags="$flags -Xswiftc -enable-testing"
+          echo "FLAGS=$flags" >> "$GITHUB_ENV"
+          swift build --build-tests $flags
+
+      # The tests answer every request with a URLProtocol stub; nothing reaches APNs.
+      - name: Test
+        run: swift test $FLAGS
+
+  macos:
+    name: macOS (Xcode ${{ matrix.xcode }}, ${{ matrix.configuration }})
+    runs-on: macos-26
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        # The oldest Xcode with Swift 6.2, and the runner's default.
+        xcode: ["26.0.1", "26.6"]
+        configuration: [debug, release]
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Select Xcode
+        run: |
+          sudo xcode-select -s /Applications/Xcode_${{ matrix.xcode }}.app
+          swift --version
+
+      - name: Build (warnings are errors)
+        run: |
+          flags="-c ${{ matrix.configuration }} -Xswiftc -warnings-as-errors"
+          # @testable imports need testing enabled in an optimized build.
+          [ "${{ matrix.configuration }}" = release ] && flags="$flags -Xswiftc -enable-testing"
+          echo "FLAGS=$flags" >> "$GITHUB_ENV"
+          swift build --build-tests $flags
+
+      - name: Test
+        run: swift test $FLAGS
