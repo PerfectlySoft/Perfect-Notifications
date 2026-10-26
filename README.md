@@ -102,8 +102,8 @@ func send(_ notification: APNSNotification, to deviceToken: String, topic: Strin
   pushes must use `.background`, which is their default.
 - **Expiration** (`apns-expiration`): `.immediate` (deliver once or drop), `.relative(seconds)`
   or `.absolute(epochSeconds)`.
-- **Collapse ID** (`apns-collapse-id`): up to 64 bytes; newer notifications with the same ID
-  replace older ones on the device.
+- **Collapse ID** (`apns-collapse-id`): 1–64 printable ASCII characters (`!` to `~`, no
+  spaces); newer notifications with the same ID replace older ones on the device.
 - `sendAlert(to:topic:title:body:...)` and `sendBackground(to:topic:customData:)` cover the
   common cases.
 
@@ -124,9 +124,11 @@ Custom values are `APNSJSONValue`, a `Sendable` JSON enum. Literals convert dire
 .customPayload("legacy", try APNSJSONValue(jsonObject: someAnyDictionary))
 ```
 
-`APNSNotification(raw:)` sends JSON bytes as is, and `APNSNotification(encodable:)` encodes
-your own `Encodable` payload (it must contain `aps`). The payload limit is checked before sending:
-4096 bytes, or 5120 for VoIP.
+`APNSNotification(raw:)` sends JSON bytes as is, once it has checked that they are a JSON object
+with an `aps` dictionary, and `APNSNotification(encodable:)` encodes your own `Encodable` payload
+(it must contain `aps`). The payload limit is checked before sending: 4096 bytes, or 5120 for
+VoIP. `badge` must not be negative, `relevanceScore` must be 0–1, and JSON may nest at most 64
+levels.
 
 ### Several devices
 
@@ -143,8 +145,10 @@ for r in results {
 
 Tokens are sent one after another. Each gets its own result: a bad token or a network error
 for one token doesn't stop the rest. Problems shared by every token (topic, priority, payload
-size) throw before anything is sent. For concurrency, call `send(_:to:topic:)` from a task group;
-the requests share one HTTP/2 connection.
+size) throw before anything is sent. Cancelling the calling task stops the batch without losing
+what was sent: earlier tokens keep their results, and the token in flight and the rest get
+`.failure(.cancelled)` (the one in flight may still have been delivered). For concurrency, call
+`send(_:to:topic:)` from a task group; the requests share one HTTP/2 connection.
 
 ### Responses and errors
 
@@ -156,8 +160,8 @@ invalid, in **milliseconds** since the epoch, and `error.invalidatedAt` is the s
 
 `APNSClientError` is thrown for everything the client catches itself: invalid input (device
 token, topic, collapse ID, priority, expiration, key or team ID, payload size), `.timedOut`,
-`.responseTooLarge`, `.network(...)`. Cancelling the calling task throws `CancellationError`
-promptly.
+`.responseTooLarge`, `.unexpectedRedirect`, `.network(...)`. Cancelling the calling task throws
+`CancellationError` promptly.
 
 ### Provider tokens
 
@@ -166,28 +170,42 @@ The client signs a JWT with your key and reuses it for 50 minutes (Apple accepts
 (`TooManyProviderTokenUpdates`), so the client never mints a new token sooner than that.
 After an `ExpiredProviderToken` rejection, it mints a new token and retries once if the old one is
 at least 20 minutes old. After `InvalidProviderToken` it doesn't retry (a new token from the same
-key won't help) but stops reusing the rejected token once 20 minutes have passed. Each
+key won't help) but stops reusing the rejected token once 20 minutes have passed. Token age is
+measured on a monotonic clock that counts sleep, so stepping the wall clock doesn't change when
+tokens are replaced. Each
 `APNSClient` created from a key has its own token, so share one client rather than creating many
 for the same key.
 
 ### Timeouts
 
-`APNSClient(..., timeout: 30)` sets a whole-request deadline in seconds (default 30), covering
-connect, send and response. Past it, `send` throws `APNSClientError.timedOut`.
+`APNSClient(..., timeout: 30)` sets a whole-request deadline in seconds (default 30, fractions
+allowed), covering connect, send and response. Past it, `send` throws `APNSClientError.timedOut`.
+
+### The `urlSession:` parameter
+
+The client sends through its own `URLSession`, built from the configuration of the session you
+pass (protocol classes, proxies, TLS settings and timeouts carry over), with its own delegate. It
+forwards authentication challenges, including server-trust evaluation for certificate pinning,
+to your session's delegate. Other delegate callbacks aren't forwarded. It needs its own delegate
+to refuse redirects and to cancel requests safely on Linux.
 
 ## Security notes
 
 - **Inputs are validated before a request is built.** Device tokens must be 64–200 hex digits of
   even length, so a token can't add path segments, a query or a fragment (`../`, `?`, `#`).
-  Topics must be bundle-ID syntax; collapse IDs are limited to 64 bytes with no control
-  characters; key and team IDs must be 10 ASCII letters or digits. No header value can contain
-  CR, LF or another control character. The JWT is built with `JSONEncoder`.
+  Topics must be bundle-ID syntax; collapse IDs are 1–64 printable ASCII characters; key and
+  team IDs must be 10 ASCII letters or digits. No header value can contain CR, LF, a space or
+  another control character. The JWT is built with `JSONEncoder`.
+- **Redirects are never followed.** APNs doesn't redirect, and following one would send the
+  provider token to another origin. A 3xx response, or one for another host, throws
+  `APNSClientError.unexpectedRedirect` instead of counting as a result.
 - **Secrets stay out of logs.** `"\(client)"`, `String(reflecting:)`, `dump(client)` and `Mirror`
   show the environment, key ID, team ID and timeout, but never the private key or the provider
   token. `APNSClientError.network` carries the transport error's description, which never
   includes request headers.
-- **Response bodies are capped at 16 KiB** (APNs sends a few dozen bytes). On macOS the body is
-  streamed and the request is cancelled as soon as it passes the cap. On Linux, see below.
+- **Response bodies are capped at 16 KiB** (APNs sends a few dozen bytes). The cap is enforced as
+  data arrives, and the request is cancelled when it passes it. On macOS that stops the
+  transfer. On Linux it doesn't; see below.
 - **Keep the `.p8` key out of source control**, and readable only by the server's user.
 - `Environment.custom(host:port:)` points the client at a mock APNs server for staging or tests.
   The provider token is sent there, so only use a host you control.
@@ -196,20 +214,24 @@ connect, send and response. Past it, `send` throws `APNSClientError.timedOut`.
 
 Verified on swift:6.2-noble and swift:6.4-noble, arm64 and x86_64: `URLSession` negotiates HTTP/2
 with ALPN `h2` against an HTTP/2-only server, reuses one connection, and multiplexes 20
-concurrent sends over it. Two corelibs Foundation limitations shape the Linux behaviour:
+concurrent sends over it. Three corelibs Foundation behaviours to know about:
 
-- **No streaming body read.** corelibs `URLSession` buffers a response body completely, and
-  keeps reading after the task is cancelled. The 16 KiB cap is checked once the body is in,
-  and the deadline returns control on time, but a malicious endpoint that streams an endless
-  body can grow the process's memory until the transfer ends. Reaching that needs a server
-  that passes TLS verification for `api.push.apple.com` (or your custom host). In a local test,
-  memory reached 6 GB within the 5-second deadline and was released afterwards.
-- **Cancelling a corelibs data task can block.** About 1 run in 20 against a server that never
-  answered, cancelling the task blocked the cancelling thread indefinitely. The client resumes
-  the caller first, then cancels on a Dispatch thread, so `send` still returns at the deadline.
-
-If those matter for your deployment, run the provider on macOS, or put an HTTP/2 proxy you trust
-in front of it.
+- **An endless response body keeps downloading after the client gives up.** The client counts
+  the body as it arrives, throws `responseTooLarge` past 16 KiB, and discards anything later.
+  But corelibs keeps the transfer running after its task is cancelled. Against a local server
+  streaming an endless body, `send` threw within 0.14 s and memory stayed under 110 MB in 8 of
+  8 runs. corelibs went on reading 0.2–2.7 GB, though, before the connection closed, wasting
+  bandwidth and CPU. (Before 6.0.0's final transport, the same server got the process
+  OOM-killed at about 6 GB within roughly 10 seconds, because `URLSession.data(for:)` buffered
+  everything.) Reaching this needs a server that passes TLS verification for
+  `api.push.apple.com` (or your custom host). A SwiftNIO HTTP/2 transport that resets the
+  stream at the cap is planned for 6.1.
+- **A timed-out request costs the connection.** Cancelling a corelibs task resets the HTTP/2
+  connection it was on, so the next request reconnects. Requests multiplexed alongside it
+  still complete.
+- **Cancellation is never done under a lock.** Cancelling a corelibs task while it completes
+  could deadlock the Swift concurrency pool (the client used to do exactly that). The client now
+  resumes your task first and cancels the transfer on a Dispatch thread.
 
 ## Testing
 
@@ -217,6 +239,13 @@ The test suite is hermetic: requests go to a `URLProtocol` stub that records the
 headers, body, JWT signature checked with swift-crypto) and returns scripted responses. Nothing
 contacts APNs. To test your own code, pass a `URLSession` whose configuration's `protocolClasses`
 includes such a stub, or point `Environment.custom(host:port:)` at a local mock server.
+
+The URLProtocol stub can't reproduce corelibs' real network timing, so the Linux deadlock,
+timeout, redirect and endless-body regressions are covered by scripted probes outside the
+package: a SwiftNIO HTTP/2-only server with adversarial behaviours (never answering, a 1 MiB
+header, 5,000 headers, a cross-origin 307, a trickled or endless body) and a client that runs
+the poison sequence, sub-second timeouts and hang bursts. Release verification runs them on
+Swift 6.2 and 6.4, arm64 and x86_64, in containers with no network.
 
 ## Migrating from 5.x
 
@@ -250,5 +279,9 @@ includes such a stub, or point `Environment.custom(host:port:)` at a local mock 
   expirations are validated; payloads over the limit throw `.payloadTooLarge`.
 - `APNSClientError` has new cases (exhaustive `switch`es need updating), and the `init`s take a
   `timeout:`. `APNSExpiration` is `Equatable`, `APNSNotification.payload` is public.
+- `APNSNotification(raw:)` throws: the bytes must be a JSON object with an `aps` dictionary, at
+  most 5120 bytes. Collapse IDs must be printable ASCII without spaces.
+- The client sends through its own session built from the one you pass; only authentication
+  challenges reach your session's delegate.
 - swift-crypto is `4.0.0..<5.0.0` (was `from: "3.0.0"`, which meant 3.x only and couldn't
   resolve next to Perfect-SMTP 6).
