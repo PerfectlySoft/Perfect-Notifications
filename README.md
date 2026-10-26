@@ -226,12 +226,14 @@ concurrent sends over it. Three corelibs Foundation behaviours to know about:
   everything.) Reaching this needs a server that passes TLS verification for
   `api.push.apple.com` (or your custom host). A SwiftNIO HTTP/2 transport that resets the
   stream at the cap is planned for 6.1.
-- **A timed-out request costs the connection.** Cancelling a corelibs task resets the HTTP/2
-  connection it was on, so the next request reconnects. Requests multiplexed alongside it
-  still complete.
-- **Cancellation is never done under a lock.** Cancelling a corelibs task while it completes
-  could deadlock the Swift concurrency pool (the client used to do exactly that). The client now
-  resumes your task first and cancels the transfer on a Dispatch thread.
+- **Timeouts don't cost the connection.** A timed-out or cancelled request is reset on its own;
+  requests multiplexed alongside it complete, and later ones reuse the connection (150
+  timeouts in a row used 2 connections).
+- **Cancellation is never done under a lock, and never races a callback.** Cancelling a
+  corelibs task while it completes could deadlock the Swift concurrency pool (the client used
+  to do exactly that). Answering a redirect callback after the task was cancelled crashes the
+  process. The client resumes your task first, cancels the transfer on a Dispatch thread, and
+  holds a cancel back until a pending redirect has been refused.
 
 ## Testing
 
@@ -244,7 +246,8 @@ The URLProtocol stub can't reproduce corelibs' real network timing, so the Linux
 timeout, redirect and endless-body regressions are covered by scripted probes outside the
 package: a SwiftNIO HTTP/2-only server with adversarial behaviours (never answering, a 1 MiB
 header, 5,000 headers, a cross-origin 307, a trickled or endless body) and a client that runs
-the poison sequence, sub-second timeouts and hang bursts. Release verification runs them on
+the poison sequence, sub-second timeouts, hang bursts, and a race that cancels every one of
+1,000 sends while it is being redirected. Release verification runs them on
 Swift 6.2 and 6.4, arm64 and x86_64, in containers with no network.
 
 ## Migrating from 5.x

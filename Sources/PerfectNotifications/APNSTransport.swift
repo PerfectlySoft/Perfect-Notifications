@@ -49,9 +49,20 @@ final class APNSTransport: Sendable {
                 guard flight.attach(continuation) else { return }   // cancelled before we started
                 let task = session.dataTask(with: request)
                 delegate.register(flight, for: task)
-                let timer = DispatchWorkItem { flight.finish(.failure(APNSClientError.timedOut)) }
-                guard flight.start(task: task, timer: timer) else { delegate.unregister(task); return }
-                DispatchQueue.global().asyncAfter(deadline: .now() + seconds, execute: timer)
+                // A timer source with a small leeway: `asyncAfter` on a global queue fired 3–6 %
+                // late on macOS.
+                let timer = DispatchSource.makeTimerSource(queue: .global())
+                timer.schedule(deadline: .now() + seconds, leeway: .milliseconds(10))
+                timer.setEventHandler { flight.finish(.failure(APNSClientError.timedOut)) }
+                timer.resume()
+                guard flight.start(task: task, timer: timer) else {
+                    // Finished in the meantime (cancelled). Cancel the never-resumed task too,
+                    // so the session can finish invalidating.
+                    timer.cancel()
+                    delegate.unregister(task)
+                    DispatchQueue.global().async { task.cancel() }
+                    return
+                }
                 task.resume()
             }
         } onCancel: {
@@ -70,7 +81,10 @@ private final class InFlight: @unchecked Sendable {
     private var continuation: CheckedContinuation<(Data, HTTPURLResponse), any Error>?
     private var pending: Result<(Data, HTTPURLResponse), any Error>?
     private var task: URLSessionTask?
-    private var timer: DispatchWorkItem?
+    private var timer: DispatchSourceTimer?
+    /// Set while the delegate is answering a redirect; a cancel requested meanwhile waits.
+    private var answeringRedirect = false
+    private var deferredCancel: URLSessionTask?
     private var done = false
     private var data = Data()
     private var response: HTTPURLResponse?
@@ -90,7 +104,7 @@ private final class InFlight: @unchecked Sendable {
     }
 
     /// Returns `false` if the request finished in the meantime.
-    func start(task: URLSessionTask, timer: DispatchWorkItem) -> Bool {
+    func start(task: URLSessionTask, timer: DispatchSourceTimer) -> Bool {
         lock.withLock {
             guard !done else { return false }
             self.task = task
@@ -142,7 +156,7 @@ private final class InFlight: @unchecked Sendable {
     /// Resolves the request once: resumes the caller, then cancels the transfer (off the
     /// caller's thread) if it is still running.
     func finish(_ result: Result<(Data, HTTPURLResponse), any Error>) {
-        let (c, task, timer): (CheckedContinuation<(Data, HTTPURLResponse), any Error>?, URLSessionTask?, DispatchWorkItem?) = lock.withLock {
+        let (c, task, timer): (CheckedContinuation<(Data, HTTPURLResponse), any Error>?, URLSessionTask?, DispatchSourceTimer?) = lock.withLock {
             guard !done else { return (nil, nil, nil) }
             done = true
             data = Data()
@@ -152,13 +166,42 @@ private final class InFlight: @unchecked Sendable {
             }
             continuation = nil
             defer { self.task = nil; self.timer = nil }
-            return (c, self.task, self.timer)
+            var task = self.task
+            if answeringRedirect, case .failure = result {
+                // corelibs traps if its redirect callback is answered after the task was
+                // cancelled; cancel once the answer is in.
+                deferredCancel = task
+                task = nil
+            }
+            return (c, task, self.timer)
         }
         c?.resume(with: result)
         timer?.cancel()
         if let task, case .failure = result {
             DispatchQueue.global().async { task.cancel() }
         }
+    }
+
+    /// Answers a redirect callback (with `respond`) only while the request is live, so the
+    /// answer always comes before any cancel. `respond` runs outside the lock, in case the
+    /// URL loading system calls back into the delegate synchronously; a cancel requested
+    /// meanwhile is held until it returns.
+    func refuseRedirect(_ respond: () -> Void) {
+        let live = lock.withLock { () -> Bool in
+            guard !done else { return false }
+            answeringRedirect = true
+            return true
+        }
+        // When the request is already done, its cancel has been issued, and that resolves the
+        // pending redirect on both platforms; answering it too would trap corelibs.
+        guard live else { return }
+        respond()
+        let cancel: URLSessionTask? = lock.withLock {
+            answeringRedirect = false
+            defer { deferredCancel = nil }
+            return deferredCancel
+        }
+        if let cancel { DispatchQueue.global().async { cancel.cancel() } }
     }
 }
 
@@ -209,7 +252,12 @@ private final class SessionDelegate: NSObject, URLSessionDataDelegate, @unchecke
 
     func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
                     newRequest request: URLRequest, completionHandler: @escaping @Sendable (URLRequest?) -> Void) {
-        completionHandler(nil)
+        if let flight = flight(task) {
+            flight.refuseRedirect { completionHandler(nil) }
+        } else {
+            // Not ours (or already completed): refuse without touching any state.
+            completionHandler(nil)
+        }
     }
 
     // MARK: Challenges: forwarded to the caller's delegate
